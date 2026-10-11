@@ -19,6 +19,7 @@ import { Choice, SettingSwitch } from "#renderer/components/form-kit/controls";
 import {
   AreaPage,
   GroupCard,
+  PageNote,
   SettingRow,
   StatePill,
 } from "#renderer/components/form-kit/page";
@@ -97,21 +98,7 @@ export const GeneralPage = () => {
     <AreaPage title={t("settings.pages.general")}>
       <CompanionSettings />
       <GroupCard>
-        <SettingRow
-          id="showLinkPreviews"
-          title={t("phase5.settings.showLinkPreviews")}
-          detail={t("phase5.settings.linkPreviewsDetail")}
-        >
-          <SettingSwitch
-            id="showLinkPreviews"
-            checked={prefs.showLinkPreviews !== false}
-            onCheckedChange={(showLinkPreviews) =>
-              void update({ showLinkPreviews }).catch(fail)
-            }
-          />
-        </SettingRow>
-      </GroupCard>
-      <GroupCard>
+        <LanguageRow />
         {IS_ELECTRON && info.data?.platform !== "linux" && (
           <SettingRow
             id="launchAtLogin"
@@ -128,6 +115,21 @@ export const GeneralPage = () => {
             />
           </SettingRow>
         )}
+        <SettingRow
+          id="showLinkPreviews"
+          title={t("phase5.settings.showLinkPreviews")}
+          detail={t("phase5.settings.linkPreviewsDetail")}
+        >
+          <SettingSwitch
+            id="showLinkPreviews"
+            checked={prefs.showLinkPreviews !== false}
+            onCheckedChange={(showLinkPreviews) =>
+              void update({ showLinkPreviews }).catch(fail)
+            }
+          />
+        </SettingRow>
+      </GroupCard>
+      <GroupCard>
         <SettingRow
           id="defaultWorkspace"
           title={t("phase5.settings.defaultWorkspace")}
@@ -147,7 +149,14 @@ export const GeneralPage = () => {
             }
           />
         </SettingRow>
-        <SettingRow id="defaultMode" title={t("phase5.settings.defaultMode")}>
+        <SettingRow
+          id="defaultMode"
+          title={t("phase5.settings.defaultMode")}
+          detail={t(`phase5.modeDescriptions.${prefs.defaultMode}`)}
+        >
+          {prefs.defaultMode === "YOLO" && (
+            <StatePill tone="warning">{t("phase5.careful")}</StatePill>
+          )}
           <Choice
             id="defaultMode"
             value={prefs.defaultMode}
@@ -162,7 +171,11 @@ export const GeneralPage = () => {
           />
         </SettingRow>
         {sandbox.data?.available && (
-          <SettingRow id="botMode" title={t("phase5.settings.botMode")}>
+          <SettingRow
+            id="botMode"
+            title={t("phase5.settings.botMode")}
+            detail={t(`phase5.modeDescriptions.${botMode.data ?? "YOLO"}`)}
+          >
             <Choice
               id="botMode"
               value={botMode.data ?? "YOLO"}
@@ -179,60 +192,43 @@ export const GeneralPage = () => {
           </SettingRow>
         )}
       </GroupCard>
-      <GroupCard title={t("phase5.settings.modes")}>
-        {modes.map((m) => (
-          <SettingRow
-            key={m}
-            id={`mode-${m}`}
-            title={t(`chat.mode.${m}`)}
-            detail={t(`phase5.modeDescriptions.${m}`)}
-          >
-            {m === "YOLO" && <StatePill>{t("phase5.careful")}</StatePill>}
-          </SettingRow>
-        ))}
-      </GroupCard>
     </AreaPage>
   );
 };
-export const LanguagePage = () => {
+const LanguageRow = () => {
   const { t, i18n } = useTranslation();
   const prefs = usePrefs();
   const update = useUpdatePrefs();
   return (
-    <AreaPage title={t("settings.pages.language")}>
-      <GroupCard>
-        <SettingRow
-          id="language"
-          title={t("phase5.settings.language")}
-          detail={t("phase5.settings.languageDetail")}
-        >
-          <Choice
-            id="language"
-            value={prefs.language}
-            options={[
-              {
-                value: "system",
-                label: t("phase5.systemLanguage", {
-                  language: new Intl.DisplayNames([i18n.language], {
-                    type: "language",
-                  }).of(i18n.language),
-                }),
-              },
-              ...SUPPORTED_LANGUAGES.map((x) => ({
-                value: x,
-                label:
-                  new Intl.DisplayNames([x], { type: "language" }).of(x) ?? x,
-              })),
-            ]}
-            onChange={(language) =>
-              void update({ language: language as PrefsRow["language"] }).catch(
-                () => showError(t("phase5.saveFailed"))
-              )
-            }
-          />
-        </SettingRow>
-      </GroupCard>
-    </AreaPage>
+    <SettingRow
+      id="language"
+      title={t("phase5.settings.language")}
+      detail={t("phase5.settings.languageDetail")}
+    >
+      <Choice
+        id="language"
+        value={prefs.language}
+        options={[
+          {
+            value: "system",
+            label: t("phase5.systemLanguage", {
+              language: new Intl.DisplayNames([i18n.language], {
+                type: "language",
+              }).of(i18n.language),
+            }),
+          },
+          ...SUPPORTED_LANGUAGES.map((x) => ({
+            value: x,
+            label: new Intl.DisplayNames([x], { type: "language" }).of(x) ?? x,
+          })),
+        ]}
+        onChange={(language) =>
+          void update({ language: language as PrefsRow["language"] }).catch(
+            () => showError(t("phase5.saveFailed"))
+          )
+        }
+      />
+    </SettingRow>
   );
 };
 const InstructionSchema = v.object({ text: v.pipe(v.string(), v.trim()) });
@@ -328,11 +324,13 @@ export const MemoryPage = () => {
       title={t("settings.pages.memory")}
       description={t("phase5.settings.memoryDetail")}
     >
-      {memoryQuery.isLoading && <p role="status">{t("memory.loading")}</p>}
+      {memoryQuery.isLoading && <PageNote live>{t("memory.loading")}</PageNote>}
       {(memoryQuery.isError || botNotes.isError || query.isError) && (
-        <div role="alert">
-          <p>{t("memory.readFailed")}</p>
+        <div className="flex items-center gap-3">
+          <PageNote error>{t("memory.readFailed")}</PageNote>
           <Button
+            size="sm"
+            variant="secondary"
             onClick={() => {
               void botNotes.refetch();
               void query.refetch();
@@ -346,16 +344,18 @@ export const MemoryPage = () => {
         !memoryQuery.isError &&
         memories.length === 0 &&
         !botNotes.data?.some((bot) => bot.noteDays > 0) && (
-          <p className="text-muted-foreground text-sm leading-relaxed">
-            {t("memory.empty")}
-          </p>
+          <PageNote>{t("memory.empty")}</PageNote>
         )}
       <GroupCard>
         <SettingRow
           id="customInstructions"
           title={t("phase5.settings.customInstructions")}
         />
-        {remoteChanged && <p role="status">{t("phase5.remoteChanged")}</p>}
+        {remoteChanged && (
+          <PageNote live className="px-3">
+            {t("phase5.remoteChanged")}
+          </PageNote>
+        )}
         <form
           className="space-y-3 p-3"
           onSubmit={(e) => {
@@ -394,7 +394,7 @@ export const MemoryPage = () => {
           </form.Subscribe>
         </form>
       </GroupCard>
-      {memoryError && <p role="alert">{memoryError}</p>}
+      {memoryError && <PageNote error>{memoryError}</PageNote>}
       {(["remember", "user", "memory"] as const)
         .filter((target) =>
           memories.some((m) => m.scope === "global" && m.target === target)
@@ -536,14 +536,15 @@ export const NotificationsPage = () => {
           <SettingSwitch
             id="notify"
             checked={notification.data?.enabled ?? true}
+            // System notifications are always silent; their `sound` flag
+            // only mirrors Play sounds, which is the one sound control.
             onCheckedChange={(enabled) =>
-              setNotify.mutate({
-                enabled,
-                sound: notification.data?.sound ?? true,
-              })
+              setNotify.mutate({ enabled, sound: prefs.sounds.enabled })
             }
           />
         </SettingRow>
+      </GroupCard>
+      <GroupCard>
         <SettingRow id="sounds" title={t("phase5.settings.sounds")}>
           <SettingSwitch
             id="sounds"
@@ -571,6 +572,7 @@ export const NotificationsPage = () => {
             <SoundPreview cue={cue} />
             <SettingSwitch
               id={`sound-${cue}`}
+              disabled={!prefs.sounds.enabled}
               checked={prefs.sounds.perEvent[cue] !== false}
               onCheckedChange={(enabled) =>
                 void update({
@@ -582,6 +584,8 @@ export const NotificationsPage = () => {
             />
           </SettingRow>
         ))}
+      </GroupCard>
+      <GroupCard>
         <SettingRow
           id="quietHours"
           title={t("phase5.settings.quietHours")}
