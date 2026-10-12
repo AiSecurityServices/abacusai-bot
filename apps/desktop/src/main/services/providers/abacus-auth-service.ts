@@ -469,6 +469,9 @@ const exchange = async (
  * short code through the browser, which reaches it even when the app's own
  * request could not. Without the script the page is exactly what it was.
  */
+// The app icon as the AbacusAI Bot site serves it.
+const BOT_LOGO_URL = "https://abacus.ai/static/imgs/abacusbot/bot-logo.webp";
+
 const responsePage = (): string => {
   let build = "packaged";
   try {
@@ -494,25 +497,43 @@ const responsePage = (): string => {
 <meta charset="utf-8">
 <title>AbacusAI Bot connected</title>
 <style>
-  :root { color-scheme: light dark; }
+  /* The light hand-off screen the website's bot pages use (connect, vault, upgrade). */
+  :root { color-scheme: light; }
   body {
-    margin: 0; min-height: 100vh; display: grid; place-items: center;
-    font: 15px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
-    background: #fff; color: #111;
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 48px 24px; box-sizing: border-box;
+    font: 16px/1.5 Inter, ui-sans-serif, -apple-system, system-ui, sans-serif;
+    background: #fff; color: #0a0a0a;
   }
-  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
-  .card { text-align: center; padding: 2rem; max-width: 34rem; }
-  h1 { font-size: 1.05rem; margin: 0 0 .35rem; }
-  p { margin: 0; opacity: .65; font-size: .875rem; }
-  a { color: inherit; }
-  code { font-size: .8rem; }
+  .card { width: 100%; max-width: 384px; display: flex; flex-direction: column; align-items: center; text-align: center; }
+  .mark { position: relative; width: 64px; height: 64px; }
+  .logo { display: block; width: 64px; height: 64px; border-radius: 16px; }
+  .badge {
+    position: absolute; right: -4px; bottom: -4px; width: 28px; height: 28px; box-sizing: border-box;
+    border-radius: 999px; border: 3px solid #fff; background: #16a34a;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .badge.warn { background: #f59e0b; }
+  h1 { margin: 32px 0 0; font-size: 30px; line-height: 36px; font-weight: 700; letter-spacing: -0.02em; }
+  #body { margin: 12px 0 0; font-size: 18px; line-height: 28px; color: #525252; }
+  .plan {
+    margin-top: 32px; width: 100%; box-sizing: border-box; padding: 14px 16px; border-radius: 14px;
+    background: #f5f5f5; display: flex; gap: 12px; align-items: flex-start; text-align: left;
+    font-size: 14px; line-height: 20px; color: #525252;
+  }
+  .plan b { display: block; color: #0a0a0a; font-weight: 600; margin-bottom: 2px; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
   <div class="card">
-    <h1 id="title">Abacus.AI is connected</h1>
-    <p id="body">You can close this tab and go back to the app.</p>
-    <p id="plan" style="margin-top:.6rem">Your free plan is active now! DeepSeek, Muse, Gemini and more coding models are ready to use.</p>
+    <div class="mark">
+      <img class="logo" src="${BOT_LOGO_URL}" alt="" width="64" height="64">
+      <span class="badge" id="badge"><svg id="badge-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><svg id="badge-warn" hidden width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M12 8v5M12 17h.01"/></svg></span>
+    </div>
+    <h1 id="title">You're signed in</h1>
+    <p id="body">Go back to AbacusAI Bot. You can close this tab.</p>
+    <div class="plan" id="plan"><div><b>Your free plan is active</b>DeepSeek, Muse, Gemini and more coding models are ready to use.</div></div>
   </div>
   <script>
   (function () {
@@ -537,7 +558,11 @@ const responsePage = (): string => {
           return;
         }
         var reason = String(o.reason || "unknown").replace(/[^A-Za-z0-9_]/g, "").slice(0, 32);
-        document.getElementById("title").textContent = "Sign-in did not finish in the app";
+        document.getElementById("badge").className = "badge warn";
+        // SVG elements have no .hidden property: toggle the attribute.
+        document.getElementById("badge-ok").setAttribute("hidden", "");
+        document.getElementById("badge-warn").removeAttribute("hidden");
+        document.getElementById("title").textContent = "Sign-in didn't finish";
         document.getElementById("body").textContent =
           "Abacus.AI signed you in, but the app could not complete the connection (" + reason + "). " +
           "Go back to the app and try again. If you are running the app from source, the terminal has the full error on a line starting with [abacus-auth].";
