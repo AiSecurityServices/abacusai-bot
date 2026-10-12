@@ -6,7 +6,13 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import { useSelector } from "@tanstack/react-store";
-import { lazy, Suspense, useEffect, useEffectEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useEffectEvent,
+  type ComponentProps,
+} from "react";
 import { useTranslation } from "react-i18next";
 import * as v from "valibot";
 
@@ -14,9 +20,15 @@ import { ComposerUpdateNotice } from "#platform/updates";
 import { useCollections } from "#renderer/data/db";
 import { loadFixtureRuntime } from "#renderer/features/chat/fixture-runtime";
 import { ChatView } from "#renderer/features/chat/kit/lazy-view";
+import { AgentsList } from "#renderer/features/chat/kit/subagents/agents-list";
 import { useSubagents } from "#renderer/features/chat/kit/subagents/use-subagents";
+import {
+  AGENT_BROWSER_TAB,
+  hasAgentBrowserTab,
+} from "#renderer/features/sessions/dock/agent-browser";
 import { openStartDraft } from "#renderer/features/sessions/start/start-session";
 import { updateDraft } from "#renderer/lib/continuity/composer-drafts";
+import { IS_ELECTRON } from "#renderer/lib/platform";
 import { platformSystem } from "#renderer/lib/platform-system";
 const SubagentDetail = lazy(() =>
   import("#renderer/features/chat/kit/subagents/detail").then((m) => ({
@@ -32,10 +44,17 @@ import { SessionId } from "@abacus-ai/contract/contract/ids";
 import { sessionConversationKey } from "@abacus-ai/contract/conversation-scope";
 
 import { EmptyState } from "#renderer/components/empty-state";
+import { hasInAppViewer, isUrl } from "#renderer/components/file-preview";
 import { MessageFeedback } from "#renderer/components/message-feedback";
 import { chatLoading } from "#renderer/features/chat/runtime/lazy-runtime";
 import { type ChatRuntime } from "#renderer/features/chat/runtime/runtime";
 import { SessionChangesCard } from "#renderer/features/sessions/changes/changes-card";
+import {
+  deliverablesAfter,
+  rowEndIndex,
+  sessionDeliverablesCard,
+} from "#renderer/features/sessions/chat/deliverables";
+import { SessionKnownFiles } from "#renderer/features/sessions/chat/known-files";
 import { SessionContextTray } from "#renderer/features/sessions/context/context-tray";
 import { SessionPermissionAction } from "#renderer/features/sessions/context/permission-terminal-action";
 import { SessionTasks } from "#renderer/features/sessions/context/tasks";
@@ -45,7 +64,14 @@ import {
   useWorkspace,
 } from "#renderer/features/sessions/data/queries";
 import { openSessionOnce } from "#renderer/features/sessions/data/unread-store";
-import { openTab } from "#renderer/features/sessions/dock/panel-tabs-store";
+import {
+  openTab,
+  panelTabsStore,
+} from "#renderer/features/sessions/dock/panel-tabs-store";
+import {
+  isAbsolutePreviewPath,
+  previewTargetPath,
+} from "#renderer/features/sessions/files/preview-target";
 import { SessionWorkspace } from "#renderer/features/sessions/session-workspace";
 import { SessionIdentity } from "#renderer/features/sessions/sessions-pages";
 import {
@@ -64,16 +90,23 @@ import {
   SessionSearch,
 } from "#renderer/lib/navigation/search";
 import { useAppNavigate } from "#renderer/lib/navigation/use-app-navigate";
+import { useVisibleThread } from "#renderer/lib/navigation/visible-thread";
 import { Button } from "#renderer/ui/button";
 
 const SessionAgents = ({
   runtime,
   threadId,
   selected,
+  workspaceRoot,
+  onOpenFile,
+  onOpenDiff,
 }: {
   runtime: ChatRuntime;
   threadId: string;
   selected: string | undefined;
+  workspaceRoot: string | null;
+  onOpenFile: (path: string) => void;
+  onOpenDiff: (path: string, toolKey?: string) => void;
 }) => {
   const agents = useSubagents(runtime, threadId);
   const { t } = useTranslation();
@@ -87,25 +120,19 @@ const SessionAgents = ({
           className="my-auto [&_[data-slot=empty-title]]:text-sm"
         />
       ) : (
-        agents.map((agent) => (
-          <Button
-            key={agent.id}
-            variant={selected === agent.id ? "secondary" : "ghost"}
-            onClick={() =>
-              void navigate({
-                to: ".",
-                search: (p: Record<string, unknown>) => ({
-                  ...p,
-                  agent: agent.id,
-                }),
-                replace: true,
-                transition: "none",
-              })
-            }
-          >
-            {agent.name} · {agent.status}
-          </Button>
-        ))
+        <AgentsList
+          runtime={runtime}
+          threadId={threadId}
+          selected={selected}
+          onSelect={(id) =>
+            void navigate({
+              to: ".",
+              search: (p: Record<string, unknown>) => ({ ...p, agent: id }),
+              replace: true,
+              transition: "none",
+            })
+          }
+        />
       )}
       {selected ? (
         <>
@@ -114,6 +141,9 @@ const SessionAgents = ({
               runtime={runtime}
               threadId={threadId}
               subagentRunId={selected}
+              workspaceRoot={workspaceRoot}
+              onOpenFile={onOpenFile}
+              onOpenDiff={onOpenDiff}
             />
           </Suspense>
           <Button
@@ -228,6 +258,31 @@ const SessionBeside = ({ id }: { id: string }) => {
     />
   );
 };
+/** Messages stream in here, not in the route, so the dock is not re-rendered per tick. */
+const LiveChangesCard = ({
+  session,
+  ...props
+}: { session: ReturnType<ChatRuntime["session"]> } & Omit<
+  ComponentProps<typeof SessionChangesCard>,
+  "messages"
+>) => (
+  <SessionChangesCard
+    {...props}
+    messages={useSelector(session.hostStore, (s) => s.messages)}
+  />
+);
+const LiveTasks = ({
+  session,
+  plan,
+}: {
+  session: ReturnType<ChatRuntime["session"]>;
+  plan: ComponentProps<typeof SessionTasks>["plan"];
+}) => (
+  <SessionTasks
+    messages={useSelector(session.hostStore, (s) => s.messages)}
+    plan={plan}
+  />
+);
 const SessionRoute = () => {
   const { sessionId } = Route.useParams();
   const { transport, chat: runtime } = Route.useRouteContext();
@@ -247,17 +302,25 @@ const SessionRoute = () => {
     (row ? collections.workspaces.get(row.workspaceId) : undefined);
   const model = useSessionComposerModel(row);
   const session = runtime.session(sessionId);
-  const host = useSelector(session.hostStore, (s) => s);
-  const incarnation = useSelector(host.store, (s) => s.incarnation);
-  const outcomes = useSelector(host.store, (s) => s.runs.outcomes);
+  // Only the inner store handle: the host state also carries the streaming
+  // messages, and subscribing to it here would re-render the route (and the
+  // dock under it) on every stream tick.
+  const hostCore = useSelector(session.hostStore, (s) => s.store);
+  const incarnation = useSelector(hostCore, (s) => s.incarnation);
+  const outcomes = useSelector(hostCore, (s) => s.runs.outcomes);
+  const plan = useSelector(hostCore, (s) => s.agent?.plan);
   const completed = useSelector(
-    host.store,
+    hostCore,
     (s) => s.runs.active === null && s.runs.outcomes.at(-1)?.kind === "success"
   );
   const presenter = nativePresenterFor(transport.client);
   useEffect(() => {
     openSessionOnce(sessionId);
   }, [sessionId]);
+  // The primary pane's thread (never a read-only beside pane) is the one the
+  // user sees: completion neither marks it unread nor sounds, and the agent
+  // browser's adoption reads the same fact.
+  useVisibleThread(row ? sessionId : null);
   if (!row) return <SessionGone />;
   const root = row.worktreePath ?? workspace?.path ?? null;
   const checkout = { workspaceId: row.workspaceId, sessionId };
@@ -269,16 +332,52 @@ const SessionRoute = () => {
       replace: true,
       transition: "none",
     });
+  const openDiff = (path: string, toolKey?: string) =>
+    void navigate({
+      to: "/sessions/$sessionId/diff",
+      params: { sessionId },
+      search: (p: Record<string, unknown>) => ({
+        ...p,
+        path,
+        toolKey,
+        source: toolKey ? "tool" : "git",
+      }),
+      transition: "none",
+    });
+  const openUrl = (url?: string) => {
+    const existing = url
+      ? panelTabsStore.state[key]?.tabs.find(
+          (tab) => tab.ref.startsWith("browser:") && tab.url === url
+        )
+      : undefined;
+    const ref = existing?.ref ?? `browser:${crypto.randomUUID()}`;
+    openTab(key, { ref, title: url ?? t("sessions.dock.browser"), url });
+    select(ref);
+  };
   const openFile = (path: string) => {
-    if (!root || !path.startsWith(`${root}/`)) {
+    if (isUrl(path)) {
+      openUrl(path);
+      return;
+    }
+    // Inside the checkout, or any absolute file the panel has a viewer for
+    // (guest `/workspace/...` paths map onto the checkout). What it cannot
+    // show goes to the OS: only reached from an explicit click.
+    const target = previewTargetPath(path, root);
+    const inside = target !== null && !isAbsolutePreviewPath(target);
+    if (target === null || (!inside && !hasInAppViewer(target))) {
       void platformSystem(transport.client).openPath({ path });
       return;
     }
-    const ref = `preview:${crypto.randomUUID()}`;
+    const relative = target;
+    // A file already open in the panel is focused, not opened twice.
+    const existing = panelTabsStore.state[key]?.tabs.find(
+      (tab) => tab.ref.startsWith("preview:") && tab.path === relative
+    );
+    const ref = existing?.ref ?? `preview:${crypto.randomUUID()}`;
     openTab(key, {
       ref,
       title: path.split("/").at(-1) ?? path,
-      path: path.slice(root.length + 1),
+      path: relative,
     });
     select(ref);
   };
@@ -287,16 +386,18 @@ const SessionRoute = () => {
       <PreviewRegistration
         conversationKey={key}
         open={(path, url) => {
-          if (path) openFile(path);
-          else {
-            const ref = `browser:${crypto.randomUUID()}`;
-            openTab(key, {
-              ref,
-              title: url ?? t("sessions.dock.browser"),
-              url,
-            });
-            select(ref);
-          }
+          // `present_deliverable` opens the panel unasked, so only what the
+          // panel can show: a URL, or a workspace file with an in-app viewer.
+          // Anything else never launches another app on its own.
+          if (path && isUrl(path)) openUrl(path);
+          else if (path) {
+            if (previewTargetPath(path, root) !== null && hasInAppViewer(path))
+              openFile(path);
+          } else if (hasAgentBrowserTab(key)) {
+            // The agent's own browser follows the agent; a second view
+            // of the URL would not.
+            select(AGENT_BROWSER_TAB);
+          } else if (url) openUrl(url);
         }}
       />
       <TopBarSlot>
@@ -328,7 +429,14 @@ const SessionRoute = () => {
         )}
         renderSession={(id) => <SessionBeside id={id} />}
         renderAgent={(id) => (
-          <SessionAgents runtime={runtime} threadId={sessionId} selected={id} />
+          <SessionAgents
+            runtime={runtime}
+            threadId={sessionId}
+            selected={id}
+            workspaceRoot={root}
+            onOpenFile={openFile}
+            onOpenDiff={openDiff}
+          />
         )}
         chat={
           <ChatView
@@ -338,32 +446,52 @@ const SessionRoute = () => {
             workspaceRoot={root}
             onOpenFile={openFile}
             onOpenSubagent={(id) => select("agents", { agent: id })}
-            onOpenDiff={(path, toolKey) =>
-              void navigate({
-                to: "/sessions/$sessionId/diff",
-                params: { sessionId },
-                search: (p: Record<string, unknown>) => ({
-                  ...p,
-                  path,
-                  toolKey,
-                  source: toolKey ? "tool" : "git",
-                }),
-                transition: "none",
-              })
-            }
+            onOpenDiff={openDiff}
             slots={{
-              composerNotice: <ComposerUpdateNotice />,
+              composerNotice: (
+                <>
+                  <SessionKnownFiles sessionId={sessionId} />
+                  <ComposerUpdateNotice />
+                </>
+              ),
               decorateMessage: (message, context) => {
-                if (
-                  message.role !== "assistant" ||
-                  (context.runActive &&
-                    context.index === context.messages.length - 1)
-                )
-                  return null;
+                if (message.role !== "assistant") return null;
+                // A coalesced row is keyed by its host; the turn's carrier
+                // may be any message folded into it, so use the last of them.
+                const at = rowEndIndex(message, context);
+                const files =
+                  at < 0
+                    ? null
+                    : deliverablesAfter(
+                        context.messages,
+                        at,
+                        context.runActive
+                      );
+                const after =
+                  files == null
+                    ? undefined
+                    : sessionDeliverablesCard(files, {
+                        workspaceRoot: root,
+                        onOpenFile: openFile,
+                        onOpenUrl: openUrl,
+                        onOpenExternal: (url) =>
+                          void platformSystem(transport.client).openExternal({
+                            url,
+                          }),
+                        onReveal: IS_ELECTRON
+                          ? (path) =>
+                              void transport.client.system.showItemInFolder({
+                                path,
+                              })
+                          : undefined,
+                      });
+                if (context.runActive && at === context.messages.length - 1)
+                  return after != null ? { after } : null;
                 const source = message.metadata?.abacus?.segmentId;
                 const segmentId =
                   typeof source === "string" ? source : message.id;
                 return {
+                  ...(after != null ? { after } : {}),
                   actions: (
                     <MessageFeedback
                       id={`${sessionId}:${segmentId}`}
@@ -389,28 +517,26 @@ const SessionRoute = () => {
                 />
               ),
               runTail: (
-                <SessionChangesCard
+                <LiveChangesCard
+                  session={session}
                   row={row}
                   finished={completed}
-                  messages={host.messages}
                   outcomes={outcomes}
                   root={root ?? ""}
                   review={() => select("changes")}
                 />
               ),
+              composerTasks: <LiveTasks session={session} plan={plan} />,
               composerContext: (
-                <>
-                  <SessionTasks messages={host.messages} />
-                  <SessionContextTray
-                    workspaceId={row.workspaceId}
-                    sessionId={sessionId}
-                    mode={row.mode}
-                    busy={row.turn?.isBusy === true}
-                    agentRunning={
-                      row.status === "running" || row.status === "starting"
-                    }
-                  />
-                </>
+                <SessionContextTray
+                  workspaceId={row.workspaceId}
+                  sessionId={sessionId}
+                  mode={row.mode}
+                  busy={row.turn?.isBusy === true}
+                  agentRunning={
+                    row.status === "running" || row.status === "starting"
+                  }
+                />
               ),
             }}
             composer={{
@@ -446,9 +572,8 @@ const SessionRoute = () => {
                 },
               },
               setMode: async (mode: AgentMode) => {
-                await collections.sessions.update(sessionId, (d) => {
-                  d.mode = mode;
-                }).isPersisted.promise;
+                // The server owns `mode`: a db patch would be refused, so tell
+                // the agent and let its state echo come back through the row.
                 await transport.client.agent.setMode({
                   workspaceId: row.workspaceId,
                   sessionId,

@@ -142,6 +142,23 @@ describe("botMessageDecorations", () => {
     expect(d[1]?.after).toBeUndefined();
   });
 
+  it("offers one rating per turn, on its last spoken reply", () => {
+    const d = decorateAll(botMessageDecorations(options()), [
+      msg("u1", "user", [text("hi")]),
+      msg("a1", "assistant", [text("First")]),
+      msg("a2", "assistant", [text("Second")]),
+      msg("u2", "user", [text("more")]),
+      msg("a3", "assistant", [text("Third")]),
+    ]);
+    expect(d.map((x) => x?.after != null)).toEqual([
+      false,
+      false,
+      true,
+      false,
+      true,
+    ]);
+  });
+
   it("never on the live run", () => {
     const messages = [
       msg("u", "user", [text("hi")]),
@@ -160,7 +177,7 @@ describe("botMessageDecorations", () => {
       }),
     ];
     const d = decorateAll(botMessageDecorations(opts), messages);
-    show(d[1]!.actions);
+    show(d[1]!.after);
     fireEvent.click(
       await screen.findByRole("button", { name: "Good response" })
     );
@@ -189,7 +206,7 @@ describe("botMessageDecorations", () => {
       msg("a", "assistant", [text("Hello")]),
     ];
     const d = decorateAll(botMessageDecorations(opts), messages);
-    show(d[1]!.actions);
+    show(d[1]!.after);
     fireEvent.click(
       await screen.findByRole("button", { name: "Bad response" })
     );

@@ -16,7 +16,10 @@ import {
   FileText,
   Globe,
   ListChecks,
+  LoaderCircle,
   Search,
+  Square,
+  SquareCheck,
   Terminal,
   Wrench,
   type LucideIcon,
@@ -24,6 +27,10 @@ import {
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  containmentRootFor,
+  resolveWorkspacePath,
+} from "#renderer/components/file-preview/paths";
 import { messageTime } from "#renderer/lib/bot-turns/gap-stamp";
 import { cn } from "#renderer/lib/cn";
 import { Button } from "#renderer/ui/button";
@@ -43,18 +50,27 @@ import { descriptorFor, useHost, useThreadStore } from "../../store/selectors";
 import { toolKey } from "../../store/thread-store";
 import { formatElapsed, useSeconds } from "../clock";
 import { useChatView, useSubagentScope } from "../context";
+import { ZoomableImage } from "../image-lightbox";
 import { useMessageScope } from "../message-scope";
 import { selectPermission } from "../permissions/selection";
+import { parseAnsi, tailLines } from "./ansi";
+import { AskRecapBody } from "./ask-recap";
+import { ComponentTitle } from "./component-title";
+import { componentLine } from "./component-tools";
+import { formatBytes, parseImageRead, type ImageRead } from "./image-read";
 import {
   diffLines,
+  humanToolName,
   normalizeTool,
   parseUnified,
+  stripLineNumbers,
+  todoItems,
   toolInput,
   type DiffLine,
   type NormalizedTool,
   type ToolStatus,
 } from "./normalize";
-import { kindOf, toolMeta, type ToolMeta } from "./tool-meta";
+import { kindOf, toolMeta, toolOpenPath, type ToolMeta } from "./tool-meta";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   read: FileText,
@@ -69,13 +85,14 @@ const KIND_ICONS: Record<string, LucideIcon> = {
   other: Wrench,
 };
 
-const STATUS_CLASS: Record<ToolStatus, string> = {
-  running: "text-[var(--chat-status-running)]",
+/** Done is the plain row; every other state is said by tint, not by a word. */
+const ROW_TONE: Record<ToolStatus, string> = {
+  running: "",
   "needs-you": "text-[var(--chat-status-attention)]",
-  done: "text-[var(--chat-status-done)]",
+  done: "",
   failed: "text-destructive",
-  refused: "text-[var(--chat-status-muted)]",
-  stopped: "text-[var(--chat-status-muted)]",
+  refused: "",
+  stopped: "",
 };
 
 const STATUS_KEY: Record<ToolStatus, string> = {
@@ -92,10 +109,15 @@ export type Expander =
   | "diff"
   | "read"
   | "browser"
+  | "todo"
+  | "ask"
   | "generic"
   | "none";
 
 export const expanderFor = (name: string): Expander => {
+  // The files card restates what it delivered; the input JSON adds nothing.
+  if (name === "present_deliverable" || name.endsWith("_present_deliverable"))
+    return "none";
   if (name === "bash") return "bash";
   if (name === "read" || name === "batch_file_read") return "read";
   if (
@@ -103,7 +125,8 @@ export const expanderFor = (name: string): Expander => {
   )
     return "diff";
   if (name.startsWith("browser")) return "browser";
-  if (name === "todo") return "none";
+  if (name === "todo" || name === "todo_write") return "todo";
+  if (name === "ask_user_question") return "ask";
   return "generic";
 };
 
@@ -155,11 +178,19 @@ const useNormalizedTool = (
     { runActive: live.runActive, needsYou: live.needsYou != null },
     parsePartialJSON
   );
-  return {
-    tool,
-    input: toolInput(part, parsePartialJSON),
-    needsYou: live.needsYou,
-  };
+  const input = toolInput(part, parsePartialJSON);
+  // A write whose result carries no diff still shows what it wrote, as an
+  // all-add diff.
+  const written = typeof input.content === "string" ? input.content : null;
+  const shown: NormalizedTool =
+    part.name === "write" &&
+    tool.diff == null &&
+    written != null &&
+    tool.status !== "failed" &&
+    tool.status !== "refused"
+      ? { ...tool, diff: { final: written } }
+      : tool;
+  return { tool: shown, input, needsYou: live.needsYou };
 };
 
 export const toolTitle = (
@@ -167,9 +198,10 @@ export const toolTitle = (
   input: Record<string, unknown>
 ): string => {
   try {
-    return buildToolTitle(name, input);
+    const title = buildToolTitle(name, input);
+    return title === name ? humanToolName(name) : title;
   } catch {
-    return name;
+    return humanToolName(name);
   }
 };
 
@@ -205,6 +237,12 @@ const Meta = ({ meta }: { meta: ToolMeta }) => {
       return (
         <span className="text-muted-foreground">
           {formatElapsed(now - meta.since)}
+        </span>
+      );
+    case "todo":
+      return (
+        <span className="text-muted-foreground">
+          {t("chat.tool.todoProgress", { done: meta.done, total: meta.total })}
         </span>
       );
     case "exit":
@@ -267,26 +305,82 @@ const linesOfDiff = (diff: NonNullable<NormalizedTool["diff"]>): DiffLine[] =>
         diff.final == null || diff.final === "" ? [] : diff.final.split("\n")
       );
 
+const AnsiText = ({ text }: { text: string }) => (
+  <>
+    {parseAnsi(text).map((run, index) => (
+      <span key={index} style={run.style}>
+        {run.text}
+      </span>
+    ))}
+  </>
+);
+
+/** The last lines of a still-running command, shown even while collapsed. */
+const LivePreview = ({ output }: { output: string }) => {
+  const tail = tailLines(output, 4).text;
+  return tail === "" ? null : (
+    <pre
+      className="chat-terminal ms-5.5 mt-1 max-h-16 text-xs"
+      data-live-output
+      aria-live="off"
+    >
+      <AnsiText text={tail} />
+    </pre>
+  );
+};
+
+/**
+ * A running command's latest output, for the group header while the group is
+ * closed (the rows inside unmount, so their own preview is out of reach).
+ */
+export const RunLiveOutput = ({
+  part,
+  result,
+}: {
+  part: ToolCallPart;
+  result: ToolResultPart | undefined;
+}) => {
+  const { tool } = useNormalizedTool(part, result);
+  return tool.status === "running" ? (
+    <LivePreview output={tool.terminal?.output ?? ""} />
+  ) : null;
+};
+
 const BashBody = ({ tool }: { tool: NormalizedTool }) => {
+  const { t } = useTranslation();
   const ref = useRef<HTMLPreElement>(null);
   const [following, setFollowing] = useState(true);
-  const output = tool.terminal?.output ?? tool.text;
-  const lines = output.split("\n");
-  const tail = lines.length > 2000 ? lines.slice(-2000).join("\n") : output;
+  const terminalOutput = tool.terminal?.output ?? "";
+  const output = terminalOutput !== "" ? terminalOutput : tool.text;
+  const { text: tail, hidden } = tailLines(output);
+  const running = tool.status === "running";
   useEffect(() => {
     const element = ref.current;
-    if (element != null && following && tool.status === "running")
+    if (element != null && following && running)
       element.scrollTop = element.scrollHeight;
-  }, [tail, following, tool.status]);
+  }, [tail, following, running]);
+  const exitCode = tool.terminal?.exitCode;
+  const durationMs = tool.terminal?.durationMs;
   return (
     <div className="flex flex-col gap-1.5">
       {tool.terminal?.command != null ? (
         <div className="chat-mono text-xs">{`$ ${tool.terminal.command}`}</div>
       ) : null}
-      {tail === "" ? null : (
+      {hidden > 0 ? (
+        <div className="text-muted-foreground text-xs">
+          {t("chat.tool.bashEarlierHidden", { count: hidden })}
+        </div>
+      ) : null}
+      {tail === "" ? (
+        running || tool.error != null ? null : (
+          <div className="text-muted-foreground chat-mono text-xs">
+            {t("chat.tool.bashNoOutput")}
+          </div>
+        )
+      ) : (
         <pre
           ref={ref}
-          className="chat-terminal"
+          className="chat-terminal max-h-56"
           onScroll={(event) => {
             const element = event.currentTarget;
             setFollowing(
@@ -295,9 +389,171 @@ const BashBody = ({ tool }: { tool: NormalizedTool }) => {
             );
           }}
         >
-          {tail}
+          <AnsiText text={tail} />
         </pre>
       )}
+      {tool.error != null && tool.error !== "" && tool.error !== output ? (
+        <div
+          role="alert"
+          data-bash-error
+          className="text-destructive chat-mono text-xs break-words whitespace-pre-wrap"
+        >
+          {tool.error}
+        </div>
+      ) : null}
+      {!running && (exitCode != null || durationMs != null) ? (
+        <div
+          className="chat-mono flex items-center gap-2 text-xs"
+          data-bash-footer
+        >
+          {exitCode != null ? (
+            <span
+              className={
+                exitCode === 0
+                  ? "text-[var(--chat-status-done)]"
+                  : "text-destructive"
+              }
+            >
+              {t("chat.tool.meta.exit", { code: exitCode })}
+            </span>
+          ) : null}
+          {durationMs != null ? (
+            <span className="text-muted-foreground">
+              {formatElapsed(durationMs)}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const TodoBody = ({ input }: { input: Record<string, unknown> }) => (
+  <ul className="flex flex-col gap-0.5">
+    {todoItems(input).map((item, index) => (
+      <li
+        key={index}
+        data-status={item.status}
+        className="flex items-center gap-2 py-0.5 text-xs"
+      >
+        {item.status === "completed" ? (
+          <SquareCheck
+            aria-hidden
+            className="size-3 shrink-0 text-[var(--chat-status-done)]"
+          />
+        ) : item.status === "in_progress" ? (
+          <LoaderCircle
+            aria-hidden
+            className="size-3 shrink-0 text-[var(--chat-status-running)]"
+          />
+        ) : (
+          <Square
+            aria-hidden
+            className="text-muted-foreground size-3 shrink-0"
+          />
+        )}
+        <span
+          className={cn(
+            item.status === "completed"
+              ? "text-muted-foreground line-through"
+              : item.status === "in_progress"
+                ? "text-foreground"
+                : "text-secondary-foreground"
+          )}
+        >
+          {item.content}
+        </span>
+      </li>
+    ))}
+  </ul>
+);
+
+const OUTPUT_CAP = 3000;
+
+/** Tool output in a <pre>, cut at 3000 characters behind a "show more". */
+const CappedOutput = ({ text }: { text: string }) => {
+  const { t } = useTranslation();
+  const [all, setAll] = useState(false);
+  const cut = !all && text.length > OUTPUT_CAP;
+  return (
+    <div className="flex flex-col gap-1">
+      <pre className="chat-terminal">
+        {cut ? `${text.slice(0, OUTPUT_CAP)}\n…` : text}
+      </pre>
+      {cut ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="self-start"
+          onClick={() => setAll(true)}
+        >
+          {t("chat.tool.showMoreOutput", {
+            count: text.length - OUTPUT_CAP,
+          })}
+        </Button>
+      ) : null}
+    </div>
+  );
+};
+
+const READ_LINES = 80;
+
+const ImageReadCard = ({ image }: { image: ImageRead }) => {
+  const { runtime, workspaceRoot } = useChatView();
+  const [thumb, setThumb] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const path = image.filePath;
+    runtime.host
+      .readImage(path, containmentRootFor(path, workspaceRoot))
+      .then((url) => {
+        if (!live) return;
+        if (url === "") setFailed(true);
+        else setThumb(url);
+      })
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [image.filePath, runtime, workspaceRoot]);
+  const name = image.filename || (image.filePath.split(/[\\/]/).at(-1) ?? "");
+  const subtitle = [
+    image.mimeType,
+    image.size > 0 ? formatBytes(image.size) : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div
+      className="bg-muted/50 flex items-center gap-3 rounded-lg px-2.5 py-2"
+      data-image-read
+    >
+      <div className="bg-muted flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-md">
+        {thumb != null ? (
+          <ZoomableImage
+            src={thumb}
+            alt={name}
+            className="size-12 object-cover"
+          />
+        ) : (
+          <FileText
+            aria-hidden
+            className={cn(
+              "size-4",
+              failed ? "text-destructive" : "text-muted-foreground opacity-50"
+            )}
+          />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs" title={name}>
+          {name}
+        </div>
+        {subtitle === "" ? null : (
+          <div className="text-muted-foreground text-xs">{subtitle}</div>
+        )}
+      </div>
     </div>
   );
 };
@@ -312,27 +568,46 @@ const ReadBody = ({
   const { t } = useTranslation();
   const { onOpenFile, workspaceRoot } = useChatView();
   const highlightCode = useCodeHighlighter();
-  const content = tool.read?.content ?? tool.text;
+  const image = parseImageRead(tool.text);
+  if (image != null) return <ImageReadCard image={image} />;
+  const raw = tool.read?.content ?? tool.text;
+  const stripped = stripLineNumbers(raw);
   const path =
     tool.read?.filePath ??
     (typeof input.path === "string" ? input.path : undefined);
-  const shown = content.split("\n").slice(0, 200).join("\n");
-  const abs =
-    path == null
-      ? null
-      : path.startsWith("/") ||
-          /^[A-Za-z]:[\\/]/.test(path) ||
-          workspaceRoot == null
-        ? path
-        : `${workspaceRoot.replace(/[\\/]+$/, "")}/${path}`;
+  const lines = stripped.text.split("\n");
+  const shown = lines.slice(0, READ_LINES).join("\n");
+  const more = lines.length - READ_LINES;
+  const start =
+    stripped.startLine ??
+    tool.read?.startLine ??
+    (typeof input.offset === "number" ? input.offset : 1);
+  const abs = path == null ? null : resolveWorkspacePath(path, workspaceRoot);
   return (
     <div className="flex flex-col gap-1.5">
-      <pre
-        className="chat-terminal"
-        dangerouslySetInnerHTML={{
-          __html: highlightCode(shown, languageForPath(path)),
-        }}
-      />
+      <div className="flex gap-2">
+        <pre
+          className="text-muted-foreground chat-mono shrink-0 py-2.5 text-end text-xs leading-[1.6] select-none"
+          aria-hidden
+          data-line-numbers
+        >
+          {lines
+            .slice(0, READ_LINES)
+            .map((_, index) => start + index)
+            .join("\n")}
+        </pre>
+        <pre
+          className="chat-terminal min-w-0 flex-1"
+          dangerouslySetInnerHTML={{
+            __html: highlightCode(shown, languageForPath(path)),
+          }}
+        />
+      </div>
+      {more > 0 ? (
+        <div className="text-muted-foreground text-xs">
+          {t("chat.tool.readMore", { count: more })}
+        </div>
+      ) : null}
       {abs != null && onOpenFile != null ? (
         <Button
           variant="ghost"
@@ -347,12 +622,48 @@ const ReadBody = ({
   );
 };
 
+const BROWSER_ARGS: Array<[string, string]> = [
+  ["action", "Action"],
+  ["url", "URL"],
+  ["ref", "Ref"],
+  ["selector", "Selector"],
+  ["text", "Text"],
+  ["value", "Value"],
+  ["key", "Key"],
+  ["direction", "Direction"],
+  ["url_pattern", "URL Pattern"],
+  ["depth", "Depth"],
+  ["code", "Code"],
+];
+
+/** The browser call's own arguments as label/value pairs (click target, typed text, scope, code...). */
+export const browserInputLines = (
+  name: string,
+  input: Record<string, unknown>
+): Array<[string, string]> => {
+  const lines: Array<[string, string]> = [];
+  for (const [key, label] of BROWSER_ARGS) {
+    const raw = input[key];
+    if (raw == null || raw === "" || typeof raw === "object") continue;
+    // A ref names the target; the selector is only a fallback for it.
+    if (key === "selector" && input.ref) continue;
+    const value = String(raw);
+    lines.push([
+      key === "selector" && name.includes("snapshot") ? "Scope" : label,
+      key === "code" && value.length > 200 ? `${value.slice(0, 200)}…` : value,
+    ]);
+  }
+  return lines;
+};
+
 const Body = ({
   expander,
   tool,
   input,
   diffKey,
+  name,
 }: {
+  name: string;
   diffKey: string;
   expander: Expander;
   tool: NormalizedTool;
@@ -397,38 +708,79 @@ const Body = ({
     case "browser":
       return (
         <div className="flex flex-col gap-1 text-xs">
-          <div className="chat-mono text-muted-foreground">
-            {[input.action, input.url]
-              .filter((v) => typeof v === "string")
-              .join(" ")}
-          </div>
+          {browserInputLines(name, input).length === 0 ? null : (
+            <div
+              data-browser-args
+              className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs"
+            >
+              {browserInputLines(name, input).map(([label, value]) => (
+                <span key={label}>
+                  <span className="text-muted-foreground">{label}: </span>
+                  <span className="chat-mono text-secondary-foreground">
+                    {value}
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
           {tool.text === "" ? null : (
             <pre className="chat-terminal">{tool.text}</pre>
           )}
         </div>
       );
     case "generic":
-      return tool.formatted != null ? (
-        <Markdown
-          content={tool.formatted}
-          role="assistant"
-          workspaceRoot={workspaceRoot}
+      return (
+        <div className="flex flex-col gap-2">
+          {Object.keys(input).length === 0 ? null : (
+            <div className="flex flex-col gap-1">
+              <div className="text-muted-foreground text-xs">
+                {t("chat.tool.inputLabel")}
+              </div>
+              <pre className="chat-terminal max-h-40">
+                {JSON.stringify(input, null, 2)}
+              </pre>
+            </div>
+          )}
+          {tool.formatted != null ? (
+            <Markdown
+              content={tool.formatted}
+              role="assistant"
+              workspaceRoot={workspaceRoot}
+            />
+          ) : tool.text === "" ? null : (
+            <CappedOutput text={tool.text} />
+          )}
+        </div>
+      );
+    case "todo":
+      return <TodoBody input={input} />;
+    case "ask":
+      return (
+        <AskRecapBody
+          input={input}
+          resultText={tool.text}
+          running={tool.status === "running"}
         />
-      ) : tool.text === "" ? null : (
-        <pre className="chat-terminal">{tool.text}</pre>
       );
     case "none":
       return null;
   }
 };
 
-const hasBody = (expander: Expander, tool: NormalizedTool): boolean => {
+const hasBody = (
+  expander: Expander,
+  tool: NormalizedTool,
+  input: Record<string, unknown>
+): boolean => {
   if (expander === "none") return false;
+  if (expander === "todo") return todoItems(input).length > 0;
+  if (expander === "ask") return tool.status !== "running" || tool.text !== "";
   if (expander === "bash") return tool.terminal != null || tool.text !== "";
   if (expander === "diff") return tool.diff != null || tool.text !== "";
   return (
     tool.text !== "" ||
     tool.formatted != null ||
+    (expander === "generic" && Object.keys(input).length > 0) ||
     tool.error != null ||
     expander === "browser"
   );
@@ -454,7 +806,9 @@ export const ToolLine = (props: ToolLineProps) => {
 };
 const MountedToolLine = ({ part, result, expander: fixed }: ToolLineProps) => {
   const { t } = useTranslation();
-  const { threadId, skin, session } = useChatView();
+  const { threadId, skin, session, onOpenFile, workspaceRoot, runtime } =
+    useChatView();
+  const [open, setOpen] = useState(false);
   const message = useMessageScope().message;
   const runStart = useThreadStore(
     session,
@@ -469,6 +823,20 @@ const MountedToolLine = ({ part, result, expander: fixed }: ToolLineProps) => {
   const expander = fixed ?? expanderFor(part.name);
   const Icon = KIND_ICONS[kindOf(part.name)] ?? Wrench;
   const title = toolTitle(part.name, input);
+  // A failed, stopped or refused call must not claim "Built"/"Opened": it
+  // falls back to the generic row, whose body carries the error.
+  const component =
+    tool.status === "failed" ||
+    tool.status === "stopped" ||
+    tool.status === "refused"
+      ? null
+      : componentLine(
+          part.name,
+          input,
+          tool.status === "running",
+          t,
+          tool.text
+        );
   const meta = toolMeta(
     part.name,
     input,
@@ -476,30 +844,53 @@ const MountedToolLine = ({ part, result, expander: fixed }: ToolLineProps) => {
     tool.status === "running" ? firstSeen : null
   );
   const bodyId = useId();
-  const expandable = hasBody(expander, tool);
+  const openPath = toolOpenPath(part.name, input, workspaceRoot);
+  const expandable =
+    component == null &&
+    tool.status !== "refused" &&
+    hasBody(expander, tool, input);
+  const tone = ROW_TONE[tool.status];
   const row = (
     <>
-      <span
-        className={cn("shrink-0", STATUS_CLASS[tool.status])}
-        data-status={tool.status}
-      >
-        {t(STATUS_KEY[tool.status])}
-      </span>
-      <Icon aria-hidden className="text-muted-foreground size-3.5 shrink-0" />
-      <span
-        className={cn(
-          "text-foreground min-w-0 truncate",
-          tool.status === "running" && "shimmer"
-        )}
-      >
-        {title}
-      </span>
+      {tool.status === "done" ? null : (
+        <span className="sr-only">{t(STATUS_KEY[tool.status])}</span>
+      )}
+      <Icon
+        aria-hidden
+        className={cn("size-3.5 shrink-0", tone || "text-muted-foreground")}
+      />
+      {component != null ? (
+        <ComponentTitle line={component} running={tool.status === "running"} />
+      ) : (
+        <span
+          className={cn(
+            "min-w-0 truncate",
+            tone || "text-foreground",
+            tool.status === "running" && "shimmer"
+          )}
+        >
+          {title}
+        </span>
+      )}
       <Meta meta={meta} />
     </>
   );
   return (
-    <Collapsible className="chat-tool-line" data-tool={part.name}>
-      <div className="text-muted-foreground flex min-h-7 items-center gap-2 font-mono text-xs">
+    <Collapsible
+      className="chat-tool-line"
+      data-tool={part.name}
+      open={open}
+      onOpenChange={setOpen}
+    >
+      <div
+        data-status={tool.status}
+        className={cn(
+          "text-muted-foreground flex min-h-7 items-center gap-2 font-mono text-xs",
+          tool.status === "refused" || tool.status === "stopped"
+            ? "opacity-60"
+            : undefined
+        )}
+      >
         {expandable ? (
           <CollapsibleTrigger
             aria-controls={bodyId}
@@ -514,6 +905,26 @@ const MountedToolLine = ({ part, result, expander: fixed }: ToolLineProps) => {
         ) : (
           <div className="flex min-w-0 flex-1 items-center gap-2">{row}</div>
         )}
+        {openPath != null && (onOpenFile != null || part.name === "ls") ? (
+          <button
+            type="button"
+            data-open-path={openPath}
+            title={openPath}
+            aria-label={t("chat.tool.openPath", { path: openPath })}
+            className="focus-visible:ring-ring hover:text-foreground max-w-[40%] shrink-0 truncate rounded-md underline-offset-2 outline-none hover:underline focus-visible:ring-2"
+            onClick={() =>
+              // A folder is revealed, not opened as a preview tab.
+              part.name === "ls"
+                ? void runtime.host.showItemInFolder(openPath)
+                : onOpenFile?.(openPath)
+            }
+          >
+            {openPath
+              .replace(/[\\/]+$/, "")
+              .split(/[\\/]/)
+              .at(-1) ?? openPath}
+          </button>
+        ) : null}
         {needsYou != null && skin === "session" ? (
           <Button
             variant="ghost"
@@ -524,12 +935,16 @@ const MountedToolLine = ({ part, result, expander: fixed }: ToolLineProps) => {
           </Button>
         ) : null}
       </div>
+      {!open && tool.status === "running" && expander === "bash" ? (
+        <LivePreview output={tool.terminal?.output ?? ""} />
+      ) : null}
       {expandable ? (
-        <CollapsibleContent id={bodyId} className="ps-5 pt-1 pb-2">
+        <CollapsibleContent id={bodyId} className="ps-5.5 pt-1 pb-1">
           <Body
             expander={expander}
             tool={tool}
             input={input}
+            name={part.name}
             diffKey={toolKey(scope, part.id)}
           />
         </CollapsibleContent>

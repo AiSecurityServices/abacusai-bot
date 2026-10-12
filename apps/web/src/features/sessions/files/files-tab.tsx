@@ -9,7 +9,11 @@ import { useSelector } from "@tanstack/react-store";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { FilePreview, previewKind } from "#renderer/components/file-preview";
+import {
+  containmentRootFor,
+  FilePreview,
+  previewKind,
+} from "#renderer/components/file-preview";
 import { FileTreeView } from "#renderer/components/file-tree";
 import { i18n } from "#renderer/lib/i18n";
 import { useAppNavigate } from "#renderer/lib/navigation/use-app-navigate";
@@ -38,6 +42,7 @@ import {
 import { isRelativePath } from "../data/search";
 import { panelTabsStore, updateTab } from "../dock/panel-tabs-store";
 import { useLazyChildren } from "./lazy-children";
+import { isAbsolutePreviewPath } from "./preview-target";
 export const flattenFiles = (nodes: FileTreeNode[]): string[] =>
   nodes.flatMap((n) => [
     n.relativePath + (n.kind === "directory" ? "/" : ""),
@@ -48,28 +53,35 @@ export const SessionFilePreview = ({
   path,
   renderLocal,
   preview = false,
+  inTab = preview,
 }: {
   preview?: boolean;
+  /** Rendered in a dock tab that already shows the file name. */
+  inTab?: boolean;
   root: string;
   path: string;
   renderLocal: (path: string) => ReactNode;
 }) => {
   const transport = useSessionsTransport();
-  if (!isRelativePath(path))
+  const outside = isAbsolutePreviewPath(path);
+  if (!outside && !isRelativePath(path))
     return (
       <p role="alert" className="p-4">
         {i18n.t("bots.chat.preview.failed")}
       </p>
     );
-  const absolute = `${root}/${path}`;
+  // A file outside the checkout is read under its own directory.
+  const absolute = outside ? path : `${root}/${path}`;
+  const hostRoot = outside ? containmentRootFor(path, root) : root;
   const kind = previewKind(absolute);
   if (IS_ELECTRON && (kind === "pdf" || kind === "html"))
     return <>{renderLocal(absolute)}</>;
   return (
     <FilePreview
+      hideTitle={inTab}
       initialView={preview ? "preview" : "source"}
       path={absolute}
-      hostRoot={root}
+      hostRoot={hostRoot}
       read={{
         text: (filePath, hostRoot) =>
           transport.client.files.readText({
@@ -90,6 +102,11 @@ export const SessionFilePreview = ({
       onOpenExternally={
         IS_ELECTRON
           ? (path) => void transport.client.system.openPath({ path })
+          : undefined
+      }
+      onReveal={
+        IS_ELECTRON
+          ? (path) => void transport.client.system.showItemInFolder({ path })
           : undefined
       }
     />

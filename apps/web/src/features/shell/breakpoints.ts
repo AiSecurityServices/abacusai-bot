@@ -1,1 +1,1 @@
-export { useShellBand, useShellWidth } from "#renderer/lib/shell-breakpoints";
+export { useShellBand, useShellLayout } from "#renderer/lib/shell-breakpoints";

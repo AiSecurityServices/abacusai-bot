@@ -5,7 +5,9 @@
  */
 import { toToolKind, type ToolKind } from "@abacus-ai/agent/tool-display";
 
-import { countChanges, type NormalizedTool } from "./normalize";
+import { resolveWorkspacePath } from "#renderer/components/file-preview/paths";
+
+import { countChanges, todoItems, type NormalizedTool } from "./normalize";
 
 export type ToolMeta =
   | { kind: "changes"; additions: number; deletions: number }
@@ -13,6 +15,7 @@ export type ToolMeta =
   | { kind: "matches"; count: number }
   | { kind: "elapsed"; since: number }
   | { kind: "exit"; code: number }
+  | { kind: "todo"; done: number; total: number }
   | null;
 
 const EDIT_TOOLS = new Set([
@@ -37,6 +40,15 @@ export const toolMeta = (
   tool: NormalizedTool,
   firstSeenAt: number | null
 ): ToolMeta => {
+  if (name === "todo" || name === "todo_write") {
+    const items = todoItems(input);
+    if (items.length > 0)
+      return {
+        kind: "todo",
+        done: items.filter((item) => item.status === "completed").length,
+        total: items.length,
+      };
+  }
   if (EDIT_TOOLS.has(name) && tool.diff != null) {
     const counted =
       tool.diff.additions != null && tool.diff.deletions != null
@@ -66,4 +78,29 @@ export const toolMeta = (
       return { kind: "exit", code: Number(exit[1]) };
   }
   return null;
+};
+
+/** Tools whose single `path` input is a file (or, for `ls`, a folder). */
+const PATH_TOOLS = new Set([
+  "read",
+  "write",
+  "edit",
+  "ast_edit",
+  "batch_edit",
+  "notebook_edit",
+  "delete",
+  "apply_patch",
+  "ls",
+]);
+
+/** The absolute path a file tool row opens, if it has exactly one. */
+export const toolOpenPath = (
+  name: string,
+  input: Record<string, unknown>,
+  workspaceRoot: string | null
+): string | null => {
+  if (!PATH_TOOLS.has(name)) return null;
+  const raw = input.path ?? input.file_path ?? input.notebook_path;
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  return resolveWorkspacePath(raw.trim(), workspaceRoot);
 };

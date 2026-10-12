@@ -46,6 +46,7 @@ import {
 import { UpgradeTriggers } from "../kit/upgrade-triggers";
 import { useHost, useThreadStore } from "../store/selectors";
 import type { RunOutcomeRecord } from "../store/thread-store";
+import { coalesceToolRuns, isToolOnly } from "./coalesce";
 import { toolRows, ToolWindowProvider } from "./row-context";
 import {
   dayKey,
@@ -70,6 +71,25 @@ export interface TranscriptProps {
   Message: ComponentType<{ message: UIMessage }>;
 }
 
+/**
+ * Whether an outcome draws anything. A row that draws nothing must not be
+ * mounted at all: it would still take its row gap (and, off screen, the
+ * scroller's intrinsic-size estimate), a stray gap in the transcript.
+ */
+const outcomeShown = (
+  outcome: RunOutcomeRecord,
+  latest: boolean,
+  skin: ReturnType<typeof useChatView>["skin"]
+): boolean => {
+  if (outcome.kind === "error") {
+    // A crash is stale once a retry has started (or any later run exists).
+    const code = outcome.error?.code;
+    return latest || (code !== "agent_exit" && code !== "agent_crashed");
+  }
+  // The bot skin renders no RunMarker (03-bots §24.2).
+  return skin !== "bot";
+};
+
 const Outcome = ({
   outcome,
   latest,
@@ -78,10 +98,31 @@ const Outcome = ({
   latest: boolean;
 }) => {
   const { skin } = useChatView();
+  if (!outcomeShown(outcome, latest, skin)) return null;
   if (outcome.kind === "error")
     return <ErrorCard outcome={outcome} latest={latest} />;
-  // The bot skin renders no RunMarker (03-bots §24.2).
-  return skin === "bot" ? null : <RunMarker outcome={outcome} />;
+  return <RunMarker outcome={outcome} />;
+};
+
+const OutcomeRow = ({
+  outcome,
+  latest,
+}: {
+  outcome: RunOutcomeRecord;
+  latest: boolean;
+}) => {
+  const { skin } = useChatView();
+  if (!outcomeShown(outcome, latest, skin)) return null;
+  return (
+    <MessageScrollerItem
+      className="[content-visibility:visible]"
+      // A run marker closes its turn (chat.css: 4 px under the actions row);
+      // an error card is a block of its own and keeps the row gap.
+      data-outcome={outcome.kind === "error" ? undefined : ""}
+    >
+      <Outcome outcome={outcome} latest={latest} />
+    </MessageScrollerItem>
+  );
 };
 
 const RunTail = ({ messages }: { messages: UIMessage[] }) => {
@@ -285,6 +326,7 @@ const TranscriptMessage = memo(function TranscriptMessage({
   earlier,
   fresh,
   toolGap,
+  turn,
 }: {
   message: UIMessage;
   Message: TranscriptProps["Message"];
@@ -294,6 +336,8 @@ const TranscriptMessage = memo(function TranscriptMessage({
   earlier(id: string): void;
   fresh: boolean;
   toolGap: "same" | "different" | undefined;
+  /** The sessions skin's rhythm key (chat.css); the bot skin has none. */
+  turn: "user" | "assistant" | undefined;
 }) {
   const ids = toolRows(message);
   return (
@@ -304,6 +348,7 @@ const TranscriptMessage = memo(function TranscriptMessage({
       messageId={message.id}
       data-fresh={fresh ? "" : undefined}
       data-tool-gap={toolGap}
+      data-turn={turn}
       data-tool-only={toolOnly(message) ? "" : undefined}
     >
       <ToolWindowProvider
@@ -320,6 +365,17 @@ const TranscriptMessage = memo(function TranscriptMessage({
   );
 });
 
+/** Only tool results and blank text: the group draws the results itself. */
+const drawsNothing = (message: UIMessage): boolean =>
+  message.parts.every(
+    (part) =>
+      part.type === "tool-result" ||
+      (part.type === "text" &&
+        part.content.trim() === "" &&
+        (part as { metadata?: { abacus?: { kind?: string } } }).metadata?.abacus
+          ?.kind == null)
+  );
+
 const visibleMessages = (
   messages: UIMessage[],
   skin: ReturnType<typeof useChatView>["skin"],
@@ -330,7 +386,8 @@ const visibleMessages = (
     if (
       message.role === "user"
         ? userView(message).hidden
-        : message.parts.length === 0
+        : message.parts.length === 0 ||
+          (skin !== "bot" && drawsNothing(message))
     )
       return false;
     return (
@@ -359,18 +416,7 @@ const transcriptItems = (
   }));
 };
 
-const toolOnly = (message: UIMessage | undefined): boolean =>
-  message?.role === "assistant" &&
-  message.parts.some((part) => part.type === "tool-call") &&
-  message.parts.every(
-    (part) =>
-      part.type === "tool-call" ||
-      part.type === "tool-result" ||
-      (part.type === "text" &&
-        part.content.trim() === "" &&
-        !(part as { metadata?: { abacus?: { kind?: string } } }).metadata
-          ?.abacus?.kind)
-  );
+const toolOnly = isToolOnly;
 
 const toolGapBefore = (previous: UIMessage | undefined, message: UIMessage) => {
   if (!toolOnly(message) || !toolOnly(previous)) return undefined;
@@ -456,12 +502,21 @@ export const Transcript = ({ messages, Message }: TranscriptProps) => {
   const [settled] = useState(
     () => new Set(messages.map((message) => message.id))
   );
-  const visible = visibleMessages(
+  const shownMessages = visibleMessages(
     messages,
     skin,
     slots.isMessageHidden,
     active
   );
+  // Sessions: consecutive tool steps, spread over several assistant
+  // messages, read as one group in one row.
+  const { visible, hostOf } =
+    skin === "bot"
+      ? { visible: shownMessages, hostOf: new Map<string, string>() }
+      : (({ messages: merged, hostOf: hosts }) => ({
+          visible: merged,
+          hostOf: hosts,
+        }))(coalesceToolRuns(shownMessages));
   const items = transcriptItems(visible, outcomes);
   const itemsById = new Map(items.map((item) => [item.id, item]));
   const placeholderHeight = (from: number, to: number) =>
@@ -526,19 +581,28 @@ export const Transcript = ({ messages, Message }: TranscriptProps) => {
     document.addEventListener("chat:jump-to-message", onJump);
     return () => document.removeEventListener("chat:jump-to-message", onJump);
   }, [session]);
+  const jumpRow = jump == null ? null : (hostOf.get(jump) ?? jump);
   const jumpIndex =
-    jump == null ? -1 : visible.findIndex((message) => message.id === jump);
+    jumpRow == null
+      ? -1
+      : visible.findIndex((message) => message.id === jumpRow);
   if (jumpIndex >= 0 && (jumpIndex < window.start || jumpIndex >= window.end)) {
     setWindow(newestWindow(items.slice(0, jumpIndex + 1)));
   }
   useLayoutEffect(() => {
     if (!jump || handledJump.current === jump) return;
-    const index = visible.findIndex((message) => message.id === jump);
+    const row = hostOf.get(jump) ?? jump;
+    const index = visible.findIndex((message) => message.id === row);
     if (index < 0) return;
     const target = viewportRef.current?.querySelector<HTMLElement>(
-      `[data-message-target="${CSS.escape(jump)}"]`
+      `[data-message-target="${CSS.escape(row)}"]`
     );
-    if (!target) return;
+    if (!target) {
+      // The row is there but carries no anchor: nothing to scroll to, and
+      // the request must not linger for the next row that mounts.
+      setJump(null);
+      return;
+    }
     handledJump.current = jump;
     if (highlight.current) {
       globalThis.clearTimeout(highlight.current.timer);
@@ -553,7 +617,7 @@ export const Transcript = ({ messages, Message }: TranscriptProps) => {
       setJump(null);
     }, 1200);
     highlight.current = { target, timer };
-  }, [jump, visible, window.start, window.end]);
+  }, [jump, visible, hostOf, window.start, window.end]);
   const opened = useRef(false);
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -733,14 +797,25 @@ export const Transcript = ({ messages, Message }: TranscriptProps) => {
         more={more}
         earlier={earlier}
         fresh={fresh[message.id] === true && !settled.has(message.id)}
-        toolGap={toolGapBefore(shown[index - 1], message)}
+        toolGap={
+          skin === "bot" ? toolGapBefore(shown[index - 1], message) : undefined
+        }
+        turn={
+          skin === "bot"
+            ? undefined
+            : message.role === "user"
+              ? "user"
+              : "assistant"
+        }
       />
     );
     for (const outcome of byAnchor.get(message.id) ?? [])
       rows.push(
-        <MessageScrollerItem key={`outcome-${outcome.runId}`}>
-          <Outcome outcome={outcome} latest={outcome.runId === latest} />
-        </MessageScrollerItem>
+        <OutcomeRow
+          key={`outcome-${outcome.runId}`}
+          outcome={outcome}
+          latest={outcome.runId === latest}
+        />
       );
   }
 
@@ -795,9 +870,11 @@ export const Transcript = ({ messages, Message }: TranscriptProps) => {
           className="mx-auto w-full max-w-(--content-max-w) min-w-0 gap-0 px-4 pt-6 pb-[calc(var(--composer-dock-h,0px)+var(--composer-dock-gap,16px)+var(--transcript-fade-size,80px))]"
         >
           {orphans.map((outcome) => (
-            <MessageScrollerItem key={`outcome-${outcome.runId}`}>
-              <Outcome outcome={outcome} latest={outcome.runId === latest} />
-            </MessageScrollerItem>
+            <OutcomeRow
+              key={`outcome-${outcome.runId}`}
+              outcome={outcome}
+              latest={outcome.runId === latest}
+            />
           ))}
           {rows}
           <RunTail messages={messages} />

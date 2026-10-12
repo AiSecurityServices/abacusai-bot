@@ -11,7 +11,7 @@ import { fixturePrefs } from "#renderer/data/fixture-db/rows";
 import { initI18n } from "#renderer/lib/i18n";
 import { TooltipProvider } from "#renderer/ui/tooltip";
 
-import { dropOrder, TabsRail } from ".";
+import { dropOrder, mergeOrder, TabsRail } from ".";
 vi.mock("#renderer/data/db/prefs", () => ({
   usePrefs: () => ({ ...fixturePrefs(), motion: { reduce: "on" } }),
 }));
@@ -122,4 +122,130 @@ it("does not snap the strip, so a dragged tab moves alone", async () => {
   const strip = document.querySelector<HTMLElement>("[data-topbar-tabs]")!;
   for (const element of [strip, ...strip.children])
     expect(element.className).not.toMatch(/\bsnap-/);
+});
+
+it("native drag keeps a dimmed placeholder, draws an unclipped preview and marks the drop edge", async () => {
+  await initI18n();
+  render(
+    <TabsRail
+      tabs={[
+        { id: "files", kind: "files", title: "Files" },
+        { id: "changes", kind: "changes", title: "Changes" },
+      ]}
+      active="files"
+      title={(tab) => tab.title!}
+      kinds={[]}
+      onChange={() => {}}
+      onClose={() => {}}
+      onReorder={() => {}}
+      onAdd={() => {}}
+      onDragStart={(id, event) =>
+        event.dataTransfer.setData("application/x-abacus-panel", id)
+      }
+    />
+  );
+  const items = [...document.querySelectorAll<HTMLElement>("[draggable]")];
+  const setDragImage = vi.fn();
+  const dataTransfer = {
+    setData: vi.fn(),
+    setDragImage,
+    types: ["application/x-abacus-panel"],
+  };
+  fireEvent.dragStart(items[0]!, { dataTransfer });
+  expect(items[0]!.hasAttribute("data-dragging")).toBe(true);
+  const ghost = setDragImage.mock.calls[0]![0] as HTMLElement;
+  expect(ghost.parentElement).toBe(document.body);
+  fireEvent.dragOver(items[1]!, { dataTransfer });
+  expect(items[1]!.getAttribute("data-drop")).toMatch(/^(before|after)$/);
+  fireEvent.dragEnd(items[0]!, { dataTransfer });
+  expect(items[0]!.hasAttribute("data-dragging")).toBe(false);
+  expect(items[1]!.hasAttribute("data-drop")).toBe(false);
+});
+
+it("puts each pane's tabs over that pane, with one shared set of menus and shortcuts", async () => {
+  await initI18n();
+  const change = vi.fn();
+  render(
+    <header data-slot="topbar">
+      <TooltipProvider>
+        <TabsRail
+          columns={[
+            { ids: ["terminal:a"], active: "terminal:a", left: 0, right: 500 },
+            { ids: ["chat", "files"], active: "chat", left: 508, right: 1000 },
+          ]}
+          tabs={[
+            { id: "chat", kind: "thread", title: "Chat" },
+            { id: "files", kind: "files", title: "Files" },
+            { id: "terminal:a", kind: "terminal", title: "Terminal" },
+          ]}
+          active="chat"
+          title={(tab) => tab.title!}
+          kinds={["terminal", "files"]}
+          onChange={change}
+          onClose={() => {}}
+          onReorder={() => {}}
+          onAdd={() => {}}
+          onMove={() => {}}
+        />
+      </TooltipProvider>
+    </header>
+  );
+  const lists = screen.getAllByRole("tablist");
+  expect(lists).toHaveLength(2);
+  expect(lists[0]!.textContent).toContain("Terminal");
+  expect(lists[1]!.textContent).toContain("Chat");
+  expect(lists[1]!.textContent).toContain("Files");
+  expect(screen.getAllByTestId("panel-add-tab")).toHaveLength(1);
+  // ⌘N counts across every pane, in rail order, and is handled once.
+  fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+  expect(change).toHaveBeenCalledTimes(1);
+  expect(change).toHaveBeenCalledWith("terminal:a");
+});
+
+it("merges one pane's new order back into the full tab order", () => {
+  expect(mergeOrder(["chat", "a", "files", "b"], ["b", "a"]).join()).toBe(
+    "chat,b,files,a"
+  );
+});
+
+it("keeps the grouped strips flush and the title bar draggable between tabs", async () => {
+  await initI18n();
+  const columns = [
+    { ids: ["chat"], active: "chat", left: 0, right: 300 },
+    { ids: ["terminal:one"], active: "terminal:one", left: 308, right: 600 },
+  ];
+  const { container } = render(
+    <header data-slot="topbar">
+      <TabsRail
+        columns={columns}
+        tabs={[
+          { id: "chat", kind: "thread", title: "Chat" },
+          { id: "terminal:one", kind: "terminal", title: "Terminal" },
+        ]}
+        active="chat"
+        title={(tab) => tab.title!}
+        kinds={[]}
+        onChange={() => {}}
+        onClose={() => {}}
+        onReorder={() => {}}
+        onAdd={() => {}}
+      />
+    </header>
+  );
+  const groups = container.querySelector(
+    '[data-slot="topbar-panel-tabs-groups"]'
+  )!;
+  expect(groups.className).toContain("titlebar-drag");
+  expect(groups.className).toContain("gap-0");
+  const strips = [
+    ...container.querySelectorAll('[data-slot="topbar-panel-tabs"]'),
+  ];
+  expect(strips).toHaveLength(2);
+  for (const strip of strips) {
+    expect(strip.className).toContain("titlebar-drag");
+    expect(strip.className).not.toContain("pl-2");
+    expect(strip.className).not.toContain("titlebar-nodrag");
+  }
+  for (const tab of screen.getAllByRole("tab"))
+    expect(tab.className).toContain("titlebar-nodrag");
 });

@@ -101,6 +101,28 @@ describe("FilePreview", () => {
     expect(read.text).toHaveBeenCalledWith("/w/a.md", "/w");
   });
 
+  it("fills a plain block host and scrolls its body, so a dock tab can scroll long files", async () => {
+    const { container } = render(
+      <div className="size-full">
+        <FilePreview
+          path="/w/a.md"
+          hostRoot="/w"
+          read={reads()}
+          onOpenExternally={() => {}}
+        />
+      </div>
+    );
+    await screen.findByText("Title");
+    const root = container.querySelector('[data-slot="file-preview"]')!;
+    // Not a flex item there: only an explicit height bounds the body.
+    expect(root.className).toMatch(/\bh-full\b/);
+    expect(root.className).toMatch(/\bmin-h-0\b/);
+    const body = root.children[1]!;
+    expect(body.className).toMatch(/\bmin-h-0\b/);
+    expect(body.className).toMatch(/\bflex-1\b/);
+    expect(body.className).toMatch(/\boverflow-auto\b/);
+  });
+
   it("renders code as text and images from a data URL", async () => {
     const read = reads();
     const { unmount } = render(
@@ -249,5 +271,75 @@ describe("DeliverablesCard", () => {
     expect(reveal).toHaveBeenCalledWith(items[0]);
     expect(url).toHaveBeenCalledWith(items[1]);
     expect(open).toHaveBeenCalledWith(items[1]);
+  });
+});
+
+describe("FilePreview header", () => {
+  const read = {
+    text: async () => ({ content: "hi", truncated: false }),
+    image: async () => "data:",
+  };
+
+  it("is one row with the name, its directory and icon actions", async () => {
+    const open = vi.fn();
+    const reveal = vi.fn();
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      clipboard: { writeText: vi.fn(async () => undefined) },
+    });
+    const { container } = render(
+      <FilePreview
+        path="/w/dir/theme.scss"
+        hostRoot="/w"
+        read={read}
+        onOpenExternally={open}
+        onReveal={reveal}
+      />
+    );
+    await screen.findByText("hi");
+    const header = container.querySelector("[data-slot=file-preview-header]")!;
+    expect(header.textContent).toContain("theme.scss");
+    expect(header.textContent).toContain("/w/dir/");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open with default app" })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
+    expect(open).toHaveBeenCalledWith("/w/dir/theme.scss");
+    expect(reveal).toHaveBeenCalledWith("/w/dir/theme.scss");
+    expect(screen.getByRole("button", { name: "Copy path" })).toBeTruthy();
+    vi.unstubAllGlobals();
+  });
+
+  it("hides the title in a tab but keeps the actions", async () => {
+    render(
+      <FilePreview
+        path="/w/theme.scss"
+        hostRoot="/w"
+        read={read}
+        hideTitle
+        onOpenExternally={vi.fn()}
+      />
+    );
+    await screen.findByText("hi");
+    expect(screen.queryByText("theme.scss")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Open with default app" })
+    ).toBeTruthy();
+  });
+
+  it("renders no header when a tab has nothing to act on", async () => {
+    const { container } = render(
+      <FilePreview
+        path="/w/a.txt"
+        hostRoot="/w"
+        read={read}
+        hideTitle
+        showActions={false}
+      />
+    );
+    await screen.findByText("hi");
+    expect(
+      container.querySelector("[data-slot=file-preview-header]")
+    ).toBeNull();
   });
 });

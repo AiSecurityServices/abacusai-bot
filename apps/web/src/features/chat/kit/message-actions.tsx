@@ -1,6 +1,6 @@
 import { MESSAGE_REACTION_EMOJIS } from "@abacus-ai/contract/message-reactions";
 import type { UIMessage } from "@tanstack/ai-client";
-import { ChevronDown, Copy, Plus, Reply, Smile } from "lucide-react";
+import { Check, ChevronDown, Copy, Plus, Reply, Smile } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   createContext,
@@ -13,6 +13,11 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  ACTION_BUTTON_CLASS,
+  ACTION_ICON_CLASS,
+  ACTION_ICON_STROKE,
+} from "#renderer/components/message-feedback";
 import { cn } from "#renderer/lib/cn";
 import { updateDraft } from "#renderer/lib/continuity/composer-drafts";
 import { useMotionPreference } from "#renderer/lib/motion";
@@ -870,25 +875,71 @@ const replyTo = (
 
 const MotionBubbleReactions = motion.create(BubbleReactions);
 
+const COPIED_MS = 1500;
+
 /**
- * A message's host: hovering, focusing or (on a phone) tapping it hands
- * the message to the transcript's affordance; Escape dismisses it; Tab from
- * the host reaches the smiley and the menu. Hosts without a bubble (the
- * session skin's assistant prose) carry the menu chevron themselves.
+ * Copy for the stable action rows: the label never changes (assistive tech
+ * and tests find it by name); the icon flips to a check for a moment.
+ */
+const CopyButton = ({ text, onFail }: { text: string; onFail: () => void }) => {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current != null) clearTimeout(timer.current);
+    },
+    []
+  );
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={ACTION_BUTTON_CLASS}
+      // Keep the transcript selection while copying it.
+      onMouseDown={(event) => event.preventDefault()}
+      aria-label={t("chat.actions.copy")}
+      onClick={() =>
+        void navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          if (timer.current != null) clearTimeout(timer.current);
+          timer.current = setTimeout(() => setCopied(false), COPIED_MS);
+        }, onFail)
+      }
+    >
+      {copied ? (
+        <Check
+          aria-hidden
+          className={ACTION_ICON_CLASS}
+          strokeWidth={ACTION_ICON_STROKE}
+        />
+      ) : (
+        <Copy
+          aria-hidden
+          className={ACTION_ICON_CLASS}
+          strokeWidth={ACTION_ICON_STROKE}
+        />
+      )}
+    </Button>
+  );
+};
+
+/**
+ * The sessions skin's user message: its Copy sits directly under the bubble,
+ * aligned to its edge. The row has no layout height: the button hangs into
+ * the 24 px turn gap the transcript puts after a user message (chat.css), so
+ * the message takes no dead space for a control that shows on hover or focus
+ * anywhere in the message (always visible on touch screens).
  */
 const SessionActions = ({
   message,
   text,
-  feedback,
   children,
 }: {
   message: UIMessage;
   text: string;
-  feedback?: ReactNode;
   children: ReactNode;
 }) => {
-  const { t } = useTranslation();
-  const { composer } = useChatView();
   const [failed, setFailed] = useState(false);
   return (
     <div
@@ -899,37 +950,64 @@ const SessionActions = ({
       {children}
       {text.trim() !== "" ? (
         <div
-          onMouseDown={(event) => event.preventDefault()}
           data-slot="session-message-actions"
-          className="pointer-events-none absolute start-0 top-full z-10 flex h-7 items-center gap-0.5 rounded-md bg-[var(--chat-surface)] opacity-0 group-focus-within/message:pointer-events-auto group-focus-within/message:opacity-100 group-hover/message:pointer-events-auto group-hover/message:opacity-100"
+          className="relative h-0 opacity-0 transition-opacity duration-150 group-focus-within/message:opacity-100 group-hover/message:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100"
         >
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            aria-label={t("chat.actions.copy")}
-            onClick={() =>
-              void navigator.clipboard
-                .writeText(text)
-                .catch(() => setFailed(true))
-            }
-          >
-            <Copy aria-hidden />
-          </Button>
-          {message.role === "assistant" &&
-          !composer.readOnly &&
-          !composer.turnBusy
-            ? feedback
-            : null}
+          <div className="absolute inset-x-0 top-0 flex h-7 items-center justify-end gap-0.5">
+            <CopyButton text={text} onFail={() => setFailed(true)} />
+          </div>
         </div>
       ) : null}
       {failed ? (
-        <p role="alert" className="text-destructive text-xs">
-          {t("chat.actions.failed")}
+        <p role="alert" className="text-destructive mt-7 text-end text-xs">
+          <FailedCopy />
         </p>
       ) : null}
     </div>
   );
 };
+
+const FailedCopy = () => {
+  const { t } = useTranslation();
+  return <>{t("chat.actions.failed")}</>;
+};
+
+/**
+ * The one action row of an assistant turn (everything between two user
+ * messages), at the end of the turn's last row once the turn has finished:
+ * Copy (the turn's prose) and, when the route offers it, the thumbs.
+ * It is always rendered (a faint row, so the transcript never shifts) and
+ * lifts to full strength on hover or focus; touch screens always show it.
+ */
+export const TurnActions = ({
+  text,
+  feedback,
+}: {
+  text: string;
+  feedback?: ReactNode;
+}) => {
+  const { composer } = useChatView();
+  const [failed, setFailed] = useState(false);
+  const rateable = !composer.readOnly && !composer.turnBusy;
+  if (text.trim() === "") return null;
+  return (
+    <div className="flex flex-col items-start" data-slot="turn-actions">
+      <div
+        data-slot="session-message-actions"
+        className="flex h-7 items-center gap-0.5 opacity-50 transition-opacity duration-150 focus-within:opacity-100 hover:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100"
+      >
+        <CopyButton text={text} onFail={() => setFailed(true)} />
+        {rateable ? feedback : null}
+      </div>
+      {failed ? (
+        <p role="alert" className="text-destructive text-xs">
+          <FailedCopy />
+        </p>
+      ) : null}
+    </div>
+  );
+};
+
 export const MessageActions = (props: {
   message: UIMessage;
   text?: string;
@@ -940,14 +1018,17 @@ export const MessageActions = (props: {
   const text = props.text ?? messageMarkdown(props.message);
   if (props.message.role === "assistant" && text.trim() === "")
     return <>{props.children}</>;
-  return skin === "session" ? (
-    <SessionActions
-      {...props}
-      text={props.text ?? messageMarkdown(props.message)}
-    />
-  ) : (
-    <ChatMessageActions {...props} />
-  );
+  // Sessions: assistant prose carries no per-message actions (the turn's row
+  // does, see `TurnActions`); the user's bubble has its own row.
+  if (skin === "session")
+    return props.message.role === "assistant" ? (
+      <>{props.children}</>
+    ) : (
+      <SessionActions message={props.message} text={text}>
+        {props.children}
+      </SessionActions>
+    );
+  return <ChatMessageActions {...props} />;
 };
 const ChatMessageActions = ({
   message,

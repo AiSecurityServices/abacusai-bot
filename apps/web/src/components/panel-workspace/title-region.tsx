@@ -1,4 +1,10 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { useTabsRailWidthReporter } from "#renderer/components/tabs-rail/placement";
 
@@ -15,6 +21,7 @@ export const titleRegion = (
 
 export const WorkspaceTitleRegion = ({ children }: { children: ReactNode }) => {
   const reportWidth = useTabsRailWidthReporter();
+  const report = useEffectEvent((width: number) => reportWidth?.(width));
   const ref = useRef<HTMLDivElement>(null);
   const [region, setRegion] = useState({ left: 0, width: 0 });
   useLayoutEffect(() => {
@@ -47,19 +54,18 @@ export const WorkspaceTitleRegion = ({ children }: { children: ReactNode }) => {
         const rect = target.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       });
-      const tools = visible.filter(
-        (target) => target.dataset.workspaceGroup !== "chat"
+      const expanded = root?.hasAttribute("data-workspace-expanded") ?? false;
+      // Docked: the strip spans every visible pane (each pane's tabs sit over
+      // their own pane). Otherwise it sits over the tools pane.
+      const rects = (expanded ? visible : visible.slice(-1)).map((target) =>
+        (target.closest(".dv-groupview") ?? target).getBoundingClientRect()
       );
-      const target =
-        tools.sort(
-          (a, b) =>
-            b.getBoundingClientRect().right - a.getBoundingClientRect().right
-        )[0] ??
-        visible[0] ??
-        root;
-      const rect = (
-        target?.closest(".dv-groupview") ?? target
-      )?.getBoundingClientRect();
+      const rect = rects.length
+        ? {
+            left: Math.min(...rects.map((r) => r.left)),
+            right: Math.max(...rects.map((r) => r.right)),
+          }
+        : root?.getBoundingClientRect();
       const barRect = bar.getBoundingClientRect();
       const leading = bar
         .querySelector('[data-slot="topbar-leading"]')
@@ -74,22 +80,41 @@ export const WorkspaceTitleRegion = ({ children }: { children: ReactNode }) => {
         (leading?.right ?? barRect.left) + 8,
         barRect.right - end
       );
-      reportWidth?.(next.width);
+      report(next.width);
+      // Positioned inside the bar, so relative to its left edge.
+      const local = { left: next.left - barRect.left, width: next.width };
       setRegion((previous) =>
-        previous.left === next.left && previous.width === next.width
+        previous.left === local.left && previous.width === local.width
           ? previous
-          : next
+          : local
       );
       bar.style.setProperty(
         "--workspace-title-start",
         `${next.left - barRect.left}px`
       );
+      bar.style.setProperty("--workspace-title-left", `${next.left}px`);
     };
     const schedule = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(measure);
     };
-    const mutations = new MutationObserver(schedule);
+    // Chat streams DOM into this subtree constantly; only the dock's own
+    // structure (or its flag attributes) can move the title region.
+    const structural =
+      '[data-slot="session-dock"],[data-slot="panel-workspace"],.dv-groupview,[data-workspace-group]';
+    const touches = (node: Node) =>
+      node instanceof Element &&
+      (node.matches(structural) || node.querySelector(structural) != null);
+    const mutations = new MutationObserver((records) => {
+      if (
+        records.some(
+          (record) =>
+            record.type === "attributes" ||
+            [...record.addedNodes, ...record.removedNodes].some(touches)
+        )
+      )
+        schedule();
+    });
     const shell = bar.closest('[data-slot="shell"]');
     if (shell)
       mutations.observe(shell, {
@@ -108,13 +133,14 @@ export const WorkspaceTitleRegion = ({ children }: { children: ReactNode }) => {
       window.removeEventListener("resize", schedule);
       bar.style.removeProperty("--workspace-title-start");
       bar.style.removeProperty("--workspace-context-start");
+      bar.style.removeProperty("--workspace-title-left");
     };
-  }, [reportWidth]);
+  }, []);
   return (
     <div
       ref={ref}
       data-slot="workspace-title-region"
-      className="titlebar-nodrag absolute top-0 flex min-w-0 items-start"
+      className="titlebar-drag absolute top-0 flex min-w-0 items-start"
       style={{ left: region.left, width: region.width }}
     >
       {children}

@@ -16,6 +16,14 @@ afterEach(async () => {
   current = null;
 });
 
+/** Tool runs start closed; open every one that is mounted. */
+const openRuns = () => {
+  for (const trigger of document.querySelectorAll(
+    '[data-slot="tool-group"] > button[aria-expanded="false"]'
+  ))
+    fireEvent.click(trigger);
+};
+
 describe("ChatView over scenarios", () => {
   it("renders a golden replay in the bot skin", async () => {
     current = await renderScenario("bot-golden-plain");
@@ -29,6 +37,10 @@ describe("ChatView over scenarios", () => {
     const warn = vi.spyOn(console, "warn");
     current = await renderScenario("session-running");
     await screen.findByText(/The restore takes all of its width/);
+    openRuns();
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-tool]").length).toBeGreaterThan(0)
+    );
     const rows = [...document.querySelectorAll("[data-tool]")];
     expect(rows.map((row) => row.getAttribute("data-tool"))).toEqual([
       "read",
@@ -39,9 +51,10 @@ describe("ChatView over scenarios", () => {
     const status = (name: string) =>
       rows
         .find((row) => row.getAttribute("data-tool") === name)!
-        .querySelector("[data-status]")!.textContent;
+        .querySelector("[data-status]")!
+        .getAttribute("data-status");
     expect(status("read")).toBe("done");
-    expect(status("bash")).toBe("runs");
+    expect(status("bash")).toBe("running");
     expect(
       within(rows[0] as HTMLElement).getByText("lines 168 to 268")
     ).toBeTruthy();
@@ -72,6 +85,13 @@ describe("ChatView over scenarios", () => {
       "error",
     ]);
     expect(screen.getByText("Stopped at its limit")).toBeTruthy();
+    // A finished sub-agent's report shows under its collapsed card.
+    expect(
+      within(rows[0] as HTMLElement).getByText("No issues.", {
+        selector: '[data-slot="subagent-report"] *',
+      })
+    ).toBeTruthy();
+    expect(rows[1]!.querySelector('[data-slot="subagent-report"]')).toBeNull();
     expect(
       warn.mock.calls.filter((call) => String(call[0]).includes("Missing"))
     ).toEqual([]);

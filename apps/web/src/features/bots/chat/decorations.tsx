@@ -159,8 +159,18 @@ export const botMessageDecorations = (
       decoration.before = <GapStamp at={view.stampBefore} />;
     if (view.reaction != null)
       decoration.badge = <ReactionBadge emoji={view.reaction} />;
+    // One rating per turn: the turn's last spoken reply carries it.
+    const views = viewsFor(context.messages, context.runActive);
+    let closesTurn = true;
+    for (let next = index + 1; next < context.messages.length; next++) {
+      if (context.messages[next]!.role === "user") break;
+      if (views[next]!.spoke) {
+        closesTurn = false;
+        break;
+      }
+    }
     const feedback =
-      options.feedbackEnabled && view.spoke && !view.live ? (
+      options.feedbackEnabled && view.spoke && !view.live && closesTurn ? (
         <MessageFeedback
           id={`${options.sessionId}:${feedbackSegmentId(message)}`}
           send={(rating, comment) =>
@@ -174,10 +184,13 @@ export const botMessageDecorations = (
           }
         />
       ) : null;
-    decoration.actions = feedback;
-    if (view.deliverables != null)
+    // Always visible under the reply, as the old bot list's rating row was.
+    if (feedback != null || view.deliverables != null)
       decoration.after = (
-        <>{view.deliverables != null && card(view.deliverables)}</>
+        <>
+          {feedback}
+          {view.deliverables != null && card(view.deliverables)}
+        </>
       );
     return decoration;
   };

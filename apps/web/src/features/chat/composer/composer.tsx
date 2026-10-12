@@ -1,4 +1,5 @@
 import type { AgentMode } from "@abacus-ai/contract/agent-types";
+import { detectRememberRequest } from "@abacus-ai/contract/remember";
 /**
  * The composer (spec 02 §8): a compound around the draft store. The bot pill
  * grows into a box on focus, text or attachments; the session box has two
@@ -41,6 +42,7 @@ import {
 import { documentSoundPlayer } from "#renderer/lib/document-sound";
 import { useMotionPreference } from "#renderer/lib/motion";
 import { useSharedElementName } from "#renderer/lib/navigation/shared-element";
+import { showInfo } from "#renderer/lib/toast";
 import { useMediaQuery } from "#renderer/lib/use-media-query";
 import type { VoiceState } from "#renderer/lib/voice/operation";
 import { useConnectedDictation } from "#renderer/lib/voice/use-dictation";
@@ -709,7 +711,8 @@ export const ThreadComposer = () => {
           restoreDraft(threadId, clearedRevision, saved);
           setError(message);
         };
-        void config.history?.add(route.text);
+        void config.history?.add(route.text).catch(() => {});
+        historyIndex.current = -1;
         submitting.current = config.onSubmitEnvelope != null;
         const admission = config.onSubmitEnvelope
           ? config
@@ -743,6 +746,8 @@ export const ThreadComposer = () => {
               )
                 clearDraft(threadId);
               config.onFirstSend?.(route.text);
+              if (detectRememberRequest(route.text) != null)
+                showInfo(t("memory.rememberedToast"));
             }
           })
           .catch((thrown: unknown) => {
@@ -784,6 +789,7 @@ export const ThreadComposer = () => {
 
   const historyIndex = useRef(-1);
   const historyItems = useRef<string[]>([]);
+  const historyStash = useRef("");
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (config.pending) {
       event.preventDefault();
@@ -791,10 +797,9 @@ export const ThreadComposer = () => {
     }
     if (event.nativeEvent.isComposing) return;
     const mod = event.metaKey || event.ctrlKey;
-    if (
-      event.key === "Enter" &&
-      (mod || (!event.shiftKey && trigger == null))
-    ) {
+    if (event.key === "Enter" && (mod || !event.shiftKey)) {
+      // An open trigger menu with options handles Enter itself (capture
+      // listener); one with no options must not turn Enter into a newline.
       event.preventDefault();
       submit();
       return;
@@ -807,25 +812,39 @@ export const ThreadComposer = () => {
     if (
       config.history &&
       queue.length === 0 &&
-      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
-      event.currentTarget.selectionStart === 0
+      (event.key === "ArrowUp" || event.key === "ArrowDown")
     ) {
+      const field = event.currentTarget;
+      const collapsed = field.selectionStart === field.selectionEnd;
+      const up = event.key === "ArrowUp";
+      const browsing = historyIndex.current >= 0;
+      // Up from the first line (start when not browsing), Down only from the
+      // end of the text while browsing; otherwise the arrows move the caret.
+      const caret = field.selectionStart;
+      const firstLine = !field.value.slice(0, caret).includes("\n");
+      if (
+        !collapsed ||
+        (up && (browsing ? !firstLine : caret !== 0)) ||
+        (!up && (!browsing || caret !== field.value.length))
+      )
+        return;
       event.preventDefault();
       void config.history.list().then((items) => {
+        const next = Math.min(
+          items.length - 1,
+          historyIndex.current + (up ? 1 : -1)
+        );
+        if (next < 0 && !up) {
+          historyIndex.current = -1;
+          setText(historyStash.current, null);
+          return;
+        }
+        if (next < 0) return;
+        if (historyIndex.current < 0) historyStash.current = draft.text;
+        historyIndex.current = next;
         historyItems.current = items;
-        historyIndex.current = Math.max(
-          -1,
-          Math.min(
-            items.length - 1,
-            historyIndex.current + (event.key === "ArrowUp" ? 1 : -1)
-          )
-        );
-        setText(
-          historyIndex.current < 0
-            ? ""
-            : (items[items.length - 1 - historyIndex.current] ?? ""),
-          null
-        );
+        // The list is newest first: Up walks toward older entries.
+        setText(items[next] ?? "", null);
       });
       return;
     }
@@ -1027,7 +1046,7 @@ export const ThreadComposer = () => {
             onClose={() => setTrigger(null)}
           />
         ) : null}
-        {!config.preStart && <SendError error={error} />}
+        {!config.preStart && <SendError error={error} reserve={false} />}
         {view.slots.composerNotice}
         {config.model?.otherProvider != null && (
           <OtherProviderNotice
@@ -1039,6 +1058,16 @@ export const ThreadComposer = () => {
         <label htmlFor={fieldId} className="sr-only">
           {config.placeholder}
         </label>
+        {view.slots.composerTasks != null ? (
+          // The tab rises from the box's top edge: centred, inset past the
+          // box's rounded corners, one px under the box so no seam shows.
+          <div
+            data-slot="composer-tab"
+            className="phone:mx-0 relative z-20 mx-3 -mb-px empty:hidden"
+          >
+            {view.slots.composerTasks}
+          </div>
+        ) : null}
         <motion.div
           {...morph}
           transition={surfaceTransition}
@@ -1147,9 +1176,10 @@ export const ThreadComposer = () => {
                 readOnly={config.pending}
                 placeholder={placeholder}
                 rows={1}
-                onChange={(event) =>
-                  setText(event.target.value, event.target.selectionStart)
-                }
+                onChange={(event) => {
+                  historyIndex.current = -1;
+                  setText(event.target.value, event.target.selectionStart);
+                }}
                 onSelect={(event) => {
                   const target = event.currentTarget;
                   updateDraft(threadId, (d) => ({

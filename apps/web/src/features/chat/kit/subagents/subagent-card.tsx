@@ -4,12 +4,13 @@
  * render through the same widget context (no override maps, F7). Stop stops
  * the whole reply (`ai.cancel`, F11); `handle.stop` is never called.
  */
-import type { UIMessage } from "@tanstack/ai-client";
+import { parsePartialJSON, type UIMessage } from "@tanstack/ai-client";
 import type { SubagentProps } from "@tanstack/ai-react/ui";
 import { ChevronRight, ExternalLink, Square } from "lucide-react";
-import { type ComponentType } from "react";
+import { type ComponentType, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { botVisibleMessage } from "#renderer/lib/bot-turns/turns";
 import { cn } from "#renderer/lib/cn";
 import { Button } from "#renderer/ui/button";
 import {
@@ -19,35 +20,37 @@ import {
 } from "#renderer/ui/collapsible";
 import { Tooltip, TooltipContent, TooltipTrigger } from "#renderer/ui/tooltip";
 
+import { Markdown } from "../../markdown/markdown";
+import { isBlankText } from "../../scroller/coalesce";
 import { useToolWindow } from "../../scroller/row-context";
 import { useThreadStore } from "../../store/selectors";
 import { formatElapsed, useSeconds } from "../clock";
 import { SubagentScope, useChatView } from "../context";
+import { MessageScope, useKitParts } from "../message-scope";
+import { toolInput } from "../tools/normalize";
 import { toolTitle } from "../tools/tool-line";
+import { narrationLines, subagentEnding, subagentReport } from "./summary";
 
-const stepsOf = (messages: readonly UIMessage[]): number =>
+export const stepsOf = (messages: readonly UIMessage[]): number =>
   messages.reduce(
     (count, message) =>
       count + message.parts.filter((part) => part.type === "tool-call").length,
     0
   );
 
-const latestTool = (messages: readonly UIMessage[]): string | null => {
+export const latestTool = (messages: readonly UIMessage[]): string | null => {
   for (let m = messages.length - 1; m >= 0; m -= 1) {
     const parts = messages[m]!.parts;
     for (let p = parts.length - 1; p >= 0; p -= 1) {
       const part = parts[p]!;
       if (part.type === "tool-call")
-        return toolTitle(
-          part.name,
-          (part.input as Record<string, unknown> | undefined) ?? {}
-        );
+        return toolTitle(part.name, toolInput(part, parsePartialJSON));
     }
   }
   return null;
 };
 
-const KIND_KEYS: Record<string, string> = {
+export const KIND_KEYS: Record<string, string> = {
   delegate: "chat.subagent.kind.delegate",
   browser: "chat.subagent.kind.browser",
   component: "chat.subagent.kind.component",
@@ -64,9 +67,54 @@ export const SubagentCard = (props: SubagentProps<unknown>) => {
     return null;
   return <MountedSubagentCard {...props} />;
 };
+/**
+ * A bot's sub-agent thread: each child message passes the bot's spoken-part
+ * rule (no reasoning, no stray media) and renders in its own message scope,
+ * so actions and ids are the child's, not the parent reply's.
+ */
+export const BotChildMessages = ({
+  messages,
+  running,
+}: {
+  messages: readonly UIMessage[];
+  running: boolean;
+}) => {
+  const Kit = useKitParts();
+  return messages.map((child, index) => {
+    const visible = botVisibleMessage(child, messages, running);
+    if (visible.parts.length === 0) return null;
+    return (
+      <MessageScope
+        key={child.id}
+        value={{
+          id: child.id,
+          role: child.role,
+          streaming: running && index === messages.length - 1,
+          message: visible,
+        }}
+      >
+        <Kit.Message message={visible}>
+          {(parts) =>
+            parts
+              .filter(
+                (item) =>
+                  item.part.type !== "tool-result" && !isBlankText(item.part)
+              )
+              .map((item, i) => <Kit.Part key={i} part={item} />)
+          }
+        </Kit.Message>
+      </MessageScope>
+    );
+  });
+};
+
 const MountedSubagentCard = ({ subagent, Parts }: SubagentProps<unknown>) => {
   const { t } = useTranslation();
-  const { runtime, threadId, session, onOpenSubagent } = useChatView();
+  const { runtime, threadId, session, onOpenSubagent, skin, workspaceRoot } =
+    useChatView();
+  // A bot has no Agents surface: its sub-agent works in the thread, open, as
+  // the old BotSubtaskThread did. A session card starts collapsed.
+  const [open, setOpen] = useState(skin === "bot");
   const running =
     subagent.status === "running" || subagent.status === "suspended";
   const now = useSeconds(running);
@@ -79,6 +127,13 @@ const MountedSubagentCard = ({ subagent, Parts }: SubagentProps<unknown>) => {
   const description = (subagent as { description?: string }).description;
   const name =
     description ?? t(KIND_KEYS[subagent.name] ?? "chat.subagent.kind.generic");
+  const ending = subagentEnding(
+    subagent as Parameters<typeof subagentEnding>[0]
+  );
+  const narration = running && !open ? narrationLines(subagent.messages) : [];
+  const report = open
+    ? null
+    : subagentReport(subagent as Parameters<typeof subagentReport>[0]);
   const sub = running
     ? [
         latestTool(subagent.messages),
@@ -86,17 +141,21 @@ const MountedSubagentCard = ({ subagent, Parts }: SubagentProps<unknown>) => {
       ]
         .filter(Boolean)
         .join(" · ")
-    : subagent.status === "error"
-      ? (subagent.error?.message ?? t("chat.subagent.failed"))
-      : t("chat.subagent.done", {
-          count: steps,
-          duration: formatElapsed((times?.end ?? now) - started),
-        });
+    : ending === "unfinished"
+      ? t("chat.subagent.unfinished")
+      : subagent.status === "error"
+        ? (subagent.error?.message ?? t("chat.subagent.failed"))
+        : t("chat.subagent.done", {
+            count: steps,
+            duration: formatElapsed((times?.end ?? now) - started),
+          });
   const PartsView = Parts as ComponentType;
   return (
     <Collapsible
       data-slot="subagent-row"
       data-status={subagent.status}
+      open={open}
+      onOpenChange={setOpen}
       className="rounded-xl bg-[var(--chat-surface-2)] [&+[data-slot=subagent-row]]:-mt-1"
     >
       <div className="flex min-h-13 items-center gap-3 px-3">
@@ -158,9 +217,34 @@ const MountedSubagentCard = ({ subagent, Parts }: SubagentProps<unknown>) => {
           </Tooltip>
         ) : null}
       </div>
+      {narration.length > 0 ? (
+        <ul
+          data-slot="subagent-narration"
+          className="text-muted-foreground flex flex-col gap-0.5 px-8 pb-2 text-xs"
+        >
+          {narration.map((line, index) => (
+            <li key={`${index}-${line}`} className="truncate">
+              {line}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {report != null ? (
+        <div data-slot="subagent-report" className="min-w-0 px-4 pb-3 text-sm">
+          <Markdown
+            content={report}
+            role="assistant"
+            workspaceRoot={workspaceRoot}
+          />
+        </div>
+      ) : null}
       <CollapsibleContent className="flex flex-col gap-1 px-4 pb-3">
         <SubagentScope value={subagent.id}>
-          <PartsView />
+          {skin === "bot" ? (
+            <BotChildMessages messages={subagent.messages} running={running} />
+          ) : (
+            <PartsView />
+          )}
         </SubagentScope>
       </CollapsibleContent>
     </Collapsible>

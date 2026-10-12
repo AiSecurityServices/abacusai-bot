@@ -2,7 +2,6 @@ import { AgentMode } from "@abacus-ai/contract/agent-types";
 import type { BotRow } from "@abacus-ai/contract/contract/rows";
 import { sessionConversationKey } from "@abacus-ai/contract/conversation-scope";
 import type { MessagingPlatformId } from "@abacus-ai/contract/messaging";
-import { detectRememberRequest } from "@abacus-ai/contract/remember";
 import { eq } from "@tanstack/db";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useQuery } from "@tanstack/react-query";
@@ -12,11 +11,12 @@ import { useTranslation } from "react-i18next";
 import { ConnectorRequestCard } from "#renderer/components/connector-request-card";
 import { confirmFreePoolModel } from "#renderer/components/credits-card/actions";
 import { useCollections } from "#renderer/data/db";
+import { useAppNavigate } from "#renderer/lib/navigation/use-app-navigate";
 import { useVisibleThread } from "#renderer/lib/navigation/visible-thread";
 import { IS_ELECTRON } from "#renderer/lib/platform";
 import { platformSystem, openSharedLink } from "#renderer/lib/platform-system";
 import { openPanelTab, panelScopeKey } from "#renderer/lib/side-panel/store";
-import { showError, showInfo } from "#renderer/lib/toast";
+import { showError } from "#renderer/lib/toast";
 import { Button } from "#renderer/ui/button";
 
 import { react } from "../avatar";
@@ -44,6 +44,7 @@ export const useBotChatSlots = (
   const collections = useCollections();
   const transport = useBotsTransport();
   const routine = useCheckIn(bot.id);
+  const navigate = useAppNavigate();
   const { data: session } = useLiveQuery({
     query: (q) =>
       q
@@ -105,6 +106,14 @@ export const useBotChatSlots = (
     `model:${bot.id}`
   );
   const senderLabel = senderInfo?.senderName?.trim() || session?.label?.trim();
+  const platformName = (id: string): string =>
+    id === "discord"
+      ? t("messaging.platforms.discord")
+      : id === "telegram"
+        ? t("messaging.platforms.telegram")
+        : id === "whatsapp"
+          ? t("messaging.platforms.whatsapp")
+          : id;
   const readOnlyReason = senderLabel
     ? t("bots.chat.senderReadOnly", { bot: bot.name, sender: senderLabel })
     : t("bots.chat.senderReadOnlyFallback", { bot: bot.name });
@@ -153,7 +162,7 @@ export const useBotChatSlots = (
                 bot.channel === "whatsapp"
                   ? "bots.chat.channelReadOnlyWhatsapp"
                   : "bots.chat.channelReadOnly",
-                { app: bot.channel }
+                { app: platformName(bot.channel) }
               ),
               ...(channel?.sharedLink
                 ? {
@@ -168,7 +177,9 @@ export const useBotChatSlots = (
                           })
                         }
                       >
-                        {t("bots.chat.openApp", { app: channel.id })}
+                        {t("bots.chat.openApp", {
+                          app: platformName(channel.id),
+                        })}
                       </Button>
                     ),
                   }
@@ -198,6 +209,10 @@ export const useBotChatSlots = (
     chat: {
       decorateMessage,
       isMessageHidden: decorateMessage.isMessageHidden,
+      typingCaption: (activity: {
+        status: string | null;
+        runningToolTitle: string | null;
+      }) => activity.status || activity.runningToolTitle,
       banner: (
         <>
           {asks.current && (
@@ -245,6 +260,33 @@ export const useBotChatSlots = (
         return { workspaceId: session.workspaceId, sessionId };
       },
       showModeChip: false,
+      ...(session?.workspaceId
+        ? {
+            mentions: {
+              search: async (query: string) =>
+                (
+                  await transport.client.files.search({
+                    checkout: { workspaceId: session.workspaceId, sessionId },
+                    query,
+                  })
+                ).items.map((item) => item.relativePath),
+            },
+            history: {
+              list: () =>
+                transport.client.settings.promptHistory.list({
+                  scope: sessionConversationKey(session.workspaceId, sessionId),
+                }),
+              add: async (text: string) => {
+                await transport.client.settings.promptHistory.add({
+                  scope: sessionConversationKey(session.workspaceId, sessionId),
+                  prompt: text,
+                });
+              },
+            },
+          }
+        : {}),
+      onBlocked: () =>
+        void navigate({ to: "/settings/models", transition: "settings-in" }),
       model: expanded && !readOnly ? binding : null,
       blocked:
         readOnly || binding.setup.status === "ready"
@@ -280,9 +322,7 @@ export const useBotChatSlots = (
             },
           }
         : {}),
-      onFirstSend: (text: string) => {
-        if (detectRememberRequest(text) != null)
-          showInfo(t("memory.rememberedToast"));
+      onFirstSend: () => {
         react(bot.id, "wink");
       },
       ...(readOnly

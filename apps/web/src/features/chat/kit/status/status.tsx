@@ -122,14 +122,18 @@ export const BusyLine = ({
   const now = useSeconds(true);
   return (
     <div
-      className="text-muted-foreground flex items-center gap-2 text-[13px] font-medium"
+      // The live twin of a tool group's header: same height, same left edge
+      // (a 14 px icon cell), same type.
+      className="text-muted-foreground flex min-h-7 items-center gap-2 text-xs"
       data-slot="busy-line"
     >
       <span
         aria-hidden
-        className="size-1.5 rounded-full bg-[var(--chat-status-running)]"
-      />
-      <span className="min-w-0 truncate">{label}</span>
+        className="flex size-3.5 shrink-0 items-center justify-center"
+      >
+        <span className="size-1.5 rounded-full bg-[var(--chat-status-running)]" />
+      </span>
+      <span className="shimmer min-w-0 truncate">{label}</span>
       <span className="chat-mono font-normal">
         {formatElapsed(now - startedAt)}
       </span>
@@ -177,14 +181,16 @@ export const RunMarker = ({ outcome }: { outcome: RunOutcomeRecord }) => {
   if (outcome.kind === "cancelled")
     return (
       <div
-        className="text-muted-foreground flex items-center gap-2 text-[13px]"
+        className="text-muted-foreground flex min-h-7 items-center gap-2 text-xs"
         data-slot="run-marker"
         data-kind="cancelled"
       >
         <span
           aria-hidden
-          className="size-1.5 rounded-full bg-[var(--chat-status-muted)]"
-        />
+          className="flex size-3.5 shrink-0 items-center justify-center"
+        >
+          <span className="size-1.5 rounded-full bg-[var(--chat-status-muted)]" />
+        </span>
         {t("chat.run.stopped")}
       </div>
     );
@@ -194,14 +200,16 @@ export const RunMarker = ({ outcome }: { outcome: RunOutcomeRecord }) => {
   });
   const marker = (
     <div
-      className="text-muted-foreground flex items-center gap-2 text-[13px]"
+      className="text-muted-foreground flex min-h-7 items-center gap-2 text-xs"
       data-slot="run-marker"
       data-kind="success"
     >
       <span
         aria-hidden
-        className="size-1.5 rounded-full bg-[var(--chat-status-done)]"
-      />
+        className="flex size-3.5 shrink-0 items-center justify-center"
+      >
+        <span className="size-1.5 rounded-full bg-[var(--chat-status-done)]" />
+      </span>
       {label}
     </div>
   );
@@ -360,7 +368,7 @@ export const ErrorCard = ({
     void session
       .retry(
         composer.fixedMode ? { mode: composer.fixedMode } : undefined,
-        skin === "bot" ? t("workspace.retryMessage") : undefined
+        t("workspace.retryMessage")
       )
       .catch(() => {});
   // A provider that seems silent while the computer is offline is the
@@ -425,7 +433,7 @@ export const ErrorCard = ({
                         ? { mode: composer.fixedMode }
                         : {}),
                     },
-                    skin === "bot" ? t("workspace.retryMessage") : undefined
+                    t("workspace.retryMessage")
                   );
                 }
               : undefined
@@ -672,10 +680,7 @@ export const NoticeRow = ({
             onClick={(event) => {
               if (action.type === "retry")
                 void session
-                  .retry(
-                    undefined,
-                    skin === "bot" ? t("workspace.retryMessage") : undefined
-                  )
+                  .retry(undefined, t("workspace.retryMessage"))
                   .catch(() => {});
               else if (action.type === "switch-model") {
                 if (action.model != null)

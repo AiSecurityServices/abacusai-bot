@@ -166,7 +166,12 @@ describe("R2-T25 composer", () => {
       relay,
       "session",
       {},
-      { slots: { composerContext: <span>abacusai-bot · main</span> } }
+      {
+        slots: {
+          composerContext: <span>abacusai-bot · main</span>,
+          composerTasks: <span>Tasks 0 of 8</span>,
+        },
+      }
     );
     await waitFor(() =>
       expect(composer().hasAttribute("data-expanded")).toBe(true)
@@ -194,6 +199,14 @@ describe("R2-T25 composer", () => {
     expect(within(context).getByText("abacusai-bot · main")).toBeTruthy();
     for (const cls of ["mx-3", "-mt-4", "min-h-12", "pt-4", "rounded-b-[14px]"])
       expect(context.className.split(" ")).toContain(cls);
+    // The tasks tab sits directly above the box, tucked 1 px under its edge.
+    const tab = document.querySelector<HTMLElement>(
+      '[data-slot="composer-tab"]'
+    )!;
+    expect(tab.nextElementSibling).toBe(surface);
+    expect(within(tab).getByText("Tasks 0 of 8")).toBeTruthy();
+    for (const cls of ["-mb-px", "mx-3", "empty:hidden"])
+      expect(tab.className.split(" ")).toContain(cls);
   });
 
   it("session: two rows at rest with the mode chip; Enter sends; Stop while busy; busy submit enqueues", async () => {
@@ -458,6 +471,126 @@ describe("R2-T25 composer", () => {
     expect(
       await screen.findByRole("textbox", { name: "Edit queued message" })
     ).toBeTruthy();
+  });
+
+  it("Enter with an open but empty `@` menu sends instead of inserting a newline", async () => {
+    const relay = new FakeRelay();
+    relay.emitAll(b.sessionReady());
+    current = await renderRelay(relay, "session", {
+      mentions: { search: async () => [] },
+    });
+    await waitFor(() => expect(composer()).toBeTruthy());
+    const textarea = field() as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: "look @zzz", selectionStart: 9 },
+    });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(relay.stats.send).toHaveLength(1));
+  });
+
+  it("Shift+Enter with options showing does not select one (newline stays native)", async () => {
+    const relay = new FakeRelay();
+    relay.emitAll(b.sessionReady());
+    current = await renderRelay(relay, "session", {
+      mentions: { search: async () => ["src/a.ts"] },
+    });
+    await waitFor(() => expect(composer()).toBeTruthy());
+    const textarea = field() as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: "@src", selectionStart: 4 },
+    });
+    await screen.findAllByRole("option");
+    const notPrevented = fireEvent.keyDown(textarea, {
+      key: "Enter",
+      shiftKey: true,
+    });
+    expect(notPrevented).toBe(true);
+    expect(textarea.value).toBe("@src");
+    // Plain Enter still picks the option.
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(textarea.value).toBe("@src/a.ts "));
+  });
+
+  it("prompt history: Down only from the end, and an edit leaves browsing", async () => {
+    const relay = new FakeRelay();
+    relay.emitAll(b.sessionReady());
+    current = await renderRelay(relay, "session", {
+      history: { list: async () => ["newer", "older"], add: async () => {} },
+    });
+    await waitFor(() => expect(composer()).toBeTruthy());
+    const textarea = field() as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: "draft", selectionStart: 5 },
+    });
+    textarea.setSelectionRange(0, 0);
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await waitFor(() => expect(textarea.value).toBe("newer"));
+    // Down with the caret not at the end moves the caret, not history.
+    textarea.setSelectionRange(1, 1);
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await Promise.resolve();
+    expect(textarea.value).toBe("newer");
+    // Editing resets browsing: Down no longer restores the stashed draft.
+    fireEvent.change(textarea, {
+      target: { value: "newer!", selectionStart: 6 },
+    });
+    textarea.setSelectionRange(6, 6);
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await Promise.resolve();
+    expect(textarea.value).toBe("newer!");
+  });
+
+  it("the `@` menu is a combobox with a described active option", async () => {
+    const relay = new FakeRelay();
+    relay.emitAll(b.sessionReady());
+    current = await renderRelay(relay, "session", {
+      mentions: { search: async () => ["src/a.ts", "src/b.ts"] },
+    });
+    await waitFor(() => expect(composer()).toBeTruthy());
+    const textarea = field() as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: "@src", selectionStart: 4 },
+    });
+    const options = await screen.findAllByRole("option");
+    expect(options).toHaveLength(2);
+    await waitFor(() =>
+      expect(textarea.getAttribute("aria-activedescendant")).toBe(
+        options[0]!.id
+      )
+    );
+    expect(textarea.getAttribute("role")).toBe("combobox");
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(textarea.getAttribute("aria-activedescendant")).toBe(
+        options[1]!.id
+      )
+    );
+  });
+
+  it("prompt history keeps the typed draft and restores it past the newest entry", async () => {
+    const relay = new FakeRelay();
+    relay.emitAll(b.sessionReady());
+    current = await renderRelay(relay, "session", {
+      history: { list: async () => ["newer", "older"], add: async () => {} },
+    });
+    await waitFor(() => expect(composer()).toBeTruthy());
+    const textarea = field() as HTMLTextAreaElement;
+    // Up with a typed draft but the caret mid-text moves the caret, not history.
+    fireEvent.change(textarea, {
+      target: { value: "draft", selectionStart: 5 },
+    });
+    textarea.setSelectionRange(2, 2);
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    expect(textarea.value).toBe("draft");
+    textarea.setSelectionRange(0, 0);
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await waitFor(() => expect(textarea.value).toBe("newer"));
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await waitFor(() => expect(textarea.value).toBe("older"));
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await waitFor(() => expect(textarea.value).toBe("newer"));
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await waitFor(() => expect(textarea.value).toBe("draft"));
   });
 
   it("pasted files are saved under the attachments base", async () => {
