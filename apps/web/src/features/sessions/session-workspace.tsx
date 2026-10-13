@@ -29,7 +29,7 @@ import {
   useCheckoutWatch,
   effectiveCheckoutIdentity,
 } from "./data/queries";
-import { openTab, updateTab } from "./dock/panel-tabs-store";
+import { openTab, reportTabDraw, updateTab } from "./dock/panel-tabs-store";
 import { SessionDock, type SessionDockProps } from "./dock/session-dock";
 const BrowserTab = lazy(() =>
   import("#platform/browser-tab").then((m) => ({ default: m.BrowserTab }))
@@ -130,6 +130,7 @@ export const SessionWorkspace = ({
       visible={visible}
       presenter={presenter}
       blocked={blocked}
+      onDraw={(draw) => reportTabDraw(key, owner, draw)}
     />
   );
   const openDiff = (path: string, scope: "staged" | "unstaged") =>
@@ -250,6 +251,7 @@ export const SessionWorkspace = ({
                     id={tab.ref.slice(8)}
                     url={tab.url}
                     onState={({ url }) => updateTab(key, tab.ref, { url })}
+                    onDraw={(draw) => reportTabDraw(key, tab.ref, draw)}
                     visible={visible}
                     root={root}
                     presenter={presenter}
@@ -263,6 +265,8 @@ export const SessionWorkspace = ({
                     preview
                     path={tab.path ?? ""}
                     root={root}
+                    visible={visible}
+                    onShown={() => reportTabDraw(key, tab.ref, "drawn")}
                     renderLocal={(path) => local(path, tab.ref, visible)}
                   />
                 );

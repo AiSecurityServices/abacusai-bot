@@ -1,4 +1,5 @@
 import { ExternalLink, Globe, MonitorDown } from "lucide-react";
+import { useEffect, useEffectEvent, type ComponentProps } from "react";
 import { useTranslation } from "react-i18next";
 
 import { FilePreview } from "#renderer/components/file-preview";
@@ -17,8 +18,25 @@ import { openUpgrade } from "#renderer/lib/upgrade";
 import { useAccount } from "#renderer/lib/use-account";
 import { Button } from "#renderer/ui/button";
 
-export const BrowserTab: typeof Native = ({ file, root, url, visible }) => {
+type TabDraw = Parameters<
+  NonNullable<ComponentProps<typeof Native>["onDraw"]>
+>[0];
+
+export const BrowserTab: typeof Native = ({
+  file,
+  root,
+  url,
+  visible,
+  onDraw,
+}) => {
   const { t } = useTranslation();
+  // No native view here: a visible file viewer counts as drawn, a page as not.
+  const draw = useEffectEvent((next: TabDraw) => onDraw?.(next));
+  useEffect(() => {
+    if (!visible) return;
+    draw(file ? "drawn" : "failed");
+    return () => draw("hidden");
+  }, [visible, file]);
   const { client } = useSessionsTransport();
   const account = useAccount();
   const tier = creditsTier(account.data);
