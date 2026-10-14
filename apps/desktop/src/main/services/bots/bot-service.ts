@@ -10,6 +10,7 @@ import path from "path";
 import type { UserTextTags } from "@abacus-ai/contract/agent-types";
 import {
   type Bot,
+  type HomeChannel,
   type BotChangeNotice,
   type BotChatHandle,
   type BotCreateInput,
@@ -103,6 +104,19 @@ export interface BotServiceCallbacks {
  * The bot's standing prompt, framed like custom instructions and explicit
  * that the persona does not widen permissions.
  */
+const HOME_CHANNEL_NAMES: Record<HomeChannel, string> = {
+  whatsapp: "WhatsApp",
+  telegram: "Telegram",
+  discord: "Discord",
+};
+
+/** A chat-app agent's home: the app the user talks to it in. */
+const homeChannelLines = (bot: Bot): string[] => {
+  if (bot.homeChannel == null) return [];
+  const app = HOME_CHANNEL_NAMES[bot.homeChannel];
+  return ["", `**Your main connector to use is ${app}.**`];
+};
+
 const renderPersona = (bot: Bot): string => {
   const role = bot.title.length > 0 ? bot.title : "assistant";
 
@@ -115,6 +129,7 @@ const renderPersona = (bot: Bot): string => {
     ...(bot.persona.length > 0
       ? [`**Your voice (how you speak, in every message):** ${bot.persona}`]
       : []),
+    ...homeChannelLines(bot),
     "",
     `You are ${bot.name}, a persistent named agent. This conversation is your`,
     "single ongoing chat with your user: it keeps its history across restarts,",
