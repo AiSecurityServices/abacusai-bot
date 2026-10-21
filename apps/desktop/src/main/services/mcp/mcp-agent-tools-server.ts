@@ -95,7 +95,7 @@ import {
   type MemoryTarget,
 } from "../agent-tools/memory-store";
 import { analyze } from "../agent-tools/model-analysis";
-import { reprintPdf, runPdfScript } from "../agent-tools/pdf-agent";
+import { reprintPdf } from "../agent-tools/pdf-agent";
 import {
   listServed,
   serveDirectory,
@@ -1472,12 +1472,11 @@ export class McpAgentToolsServer extends McpHttpServer {
         );
       }
 
-      const result = await runPdfScript([action, ...scriptArgs]);
-      if (result.ok !== true) {
-        const install =
-          typeof result.install === "string" ? ` Run: ${result.install}` : "";
-        return this.err(`${result.error ?? "The operation failed."}${install}`);
-      }
+      // Loaded on first use: pdf.js is too large to parse at startup.
+      const { runPdfOperation } = await import("../agent-tools/pdf-ops");
+      const result = await runPdfOperation([action, ...scriptArgs]);
+      if (result.ok !== true)
+        return this.err(String(result.error ?? "The operation failed."));
 
       const rendered = JSON.stringify(result, null, 2);
 
